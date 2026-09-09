@@ -235,3 +235,6 @@ frontend/npm-debug.log*
 frontend/yarn-debug.log*
 frontend/yarn-error.log*
 frontend/pnpm-debug.log*
+
+# Generated backend uploads and processed document chunks
+backend/data/
