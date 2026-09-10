@@ -1,0 +1,48 @@
+PDF Documents
+    ↓
+PDF Extraction
+PyMuPDF
+    ↓
+Apakah text layer bagus?
+    ├── Yes → pakai extracted text
+    └── No  → OCR fallback
+              PaddleOCR
+    ↓
+Text Cleaning
+- hapus header/footer
+- normalize whitespace
+- bersihkan OCR noise
+    ↓
+Legal Structure Parsing
+BAB
+ ↓
+Pasal
+ ↓
+Ayat
+    ↓
+Parent-Child Chunking
+
+Parent:
+Pasal lengkap
+
+Child:
+Ayat / subsection
+    ↓
+Generate Retrieval Representation
+BAAI/bge-m3
+    ├── Dense Vector
+    └── Sparse Vector
+    ↓
+Store ke Qdrant
+
+Qdrant Point:
+- dense vector
+- sparse vector
+- child text
+- parent text / parent_id
+- document
+- page
+- BAB
+- Pasal
+- Ayat
+- section_type

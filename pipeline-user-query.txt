@@ -1,0 +1,50 @@
+User Query
+    ↓
+Query Preprocessing
+- normalize query
+- detect Pasal/Ayat jika ada
+    ↓
+Optional Query Rewrite
+(hanya jika query ambigu/tidak jelas)
+    ↓
+BGE-M3
+    ├── Dense Query Vector
+    └── Sparse Query Vector
+    ↓
+Qdrant Hybrid Retrieval
+
+Dense Search ────┐
+                 ├── RRF Fusion
+Sparse Search ───┘
+                     ↓
+               Top ~20 chunks
+                     ↓
+Multilingual Reranker
+BAAI/bge-reranker-v2-m3
+                     ↓
+                  Top 5
+                     ↓
+Parent Context Expansion
+
+Child:
+Pasal 8 ayat (1)
+        ↓
+ambil parent:
+Pasal 8 lengkap
+                     ↓
+Deduplicate Parent
+                     ↓
+Build LLM Context
+- text
+- document
+- page
+- Pasal
+- Ayat
+                     ↓
+LLM
+                     ↓
+Grounded Answer
+                     ↓
+Citation Formatter
+                     ↓
+Final Response
