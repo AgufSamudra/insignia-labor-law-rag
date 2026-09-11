@@ -102,7 +102,16 @@ jawaban dengan citation.
 
 ## How to Run - with Docker Compose
 
-Prasyarat: Docker Engine, Docker Compose, DeepInfra API key, dan koneksi internet.
+Prasyarat: Docker Engine atau Docker Desktop, Docker Compose, DeepInfra API key,
+dan koneksi internet.
+
+~~~bash
+git clone https://github.com/AgufSamudra/insignia-labor-law-rag
+~~~
+
+~~~bash
+cd insignia-labor-law-rag
+~~~
 
 ~~~bash
 cp backend/.env.example backend/.env
@@ -117,7 +126,7 @@ DEEPINFRA_API_KEY=your_deepinfra_api_key
 Jalankan:
 
 ~~~bash
-docker compose up -d
+docker compose up -d --build
 ~~~
 
 Endpoint:
