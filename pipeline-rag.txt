@@ -7,14 +7,26 @@ Mengubah satu atau beberapa PDF hukum ketenagakerjaan menjadi chunk terstruktur,
 membuat dense dan sparse embedding, lalu menyimpannya ke Qdrant. Proses berjalan
 di background setelah API upload mengembalikan job_id.
 
+Urutan fungsi orchestration
+--------------------------
+1. one_validate_and_save_uploaded_files
+2. two_schedule_background_processing
+3. three_process_document_job
+4. four_extract_document_chunks
+5. five_save_vectors_to_qdrant
+6. six_mark_document_completed
+7. seven_finalize_upload_job
+
+Seluruh fungsi tersebut berada di
+backend/src/utils/document/upload_pipeline_utils.py.
+
 Diagram flow
 ------------
 
 Pengguna memilih satu/beberapa file PDF di frontend
                          |
                          v
-POST /upload_document
-(alias: /upload-documents dan /documents/upload)
+POST /v1/documents/upload
                          |
                          v
 Validasi ekstensi .pdf untuk setiap file
@@ -38,8 +50,8 @@ Publish event "upload / queued"
 API langsung mengembalikan job_id dan status queued
        |
        +---- Frontend memantau progress melalui SSE
-       |     GET /documents/{job_id}/events
-       |     (status history tersedia di /documents/{job_id}/status)
+       |     GET /v1/documents/{job_id}/events
+       |     (status history tersedia di /v1/documents/{job_id}/status)
        v
 Background job memproses dokumen satu per satu
        |

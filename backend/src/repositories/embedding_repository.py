@@ -1,10 +1,7 @@
-"""DeepInfra client for BGE-M3 dense and sparse embeddings."""
-
 from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -12,24 +9,17 @@ import httpx
 try:
     from ..core.config import Settings
     from ..core.errors import EmbeddingServiceError
+    from ..models.query_model import Embedding
 except ImportError:  # Supports running this module directly from src/.
     from core.config import Settings
     from core.errors import EmbeddingServiceError
+    from models.query_model import Embedding
 
 
 logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class Embedding:
-    """The dense and sparse vectors belonging to one text."""
-
-    dense: list[float]
-    sparse_indices: list[int]
-    sparse_values: list[float]
-
-
-class DeepInfraEmbeddingClient:
+class DeepInfraEmbeddingRepository:
     """HTTPX client for DeepInfra's native BGE-M3 endpoint."""
 
     def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None):

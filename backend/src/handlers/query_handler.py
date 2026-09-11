@@ -1,20 +1,15 @@
-"""User-query endpoint handler."""
-
 from typing import Any
 
-try:
-    from ..models.document import QueryRequest
-except ImportError:
-    from models.document import QueryRequest
+from ..models.query_model import QueryRequest
+from ..services.query_service import QueryService
 
 
-async def query_user(request: QueryRequest) -> dict[str, Any]:
-    """Delegate the existing query behavior through the handler layer."""
-    try:
-        from ..main import query_user as implementation
-    except ImportError:
-        from main import query_user as implementation
-    return await implementation(request)
+class QueryHandler:
+    def __init__(self, service: QueryService) -> None:
+        self.service = service
+
+    async def query(self, request: QueryRequest) -> dict[str, Any]:
+        return await self.service.query(request)
 
 
-__all__ = ["query_user"]
+__all__ = ["QueryHandler"]

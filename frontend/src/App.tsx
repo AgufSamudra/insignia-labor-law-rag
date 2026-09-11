@@ -16,6 +16,9 @@ type FileProgress = {
   progress_total?: number
   progress_percent?: number
   progress_unit?: string
+  native_pages?: number
+  ocr_pages?: number
+  total_pages?: number
   error?: string
 }
 
@@ -167,6 +170,9 @@ function App() {
           progress_total: event.progress_total,
           progress_percent: event.progress_percent,
           progress_unit: event.progress_unit,
+          native_pages: event.native_pages ?? currentProgress[event.filename]?.native_pages,
+          ocr_pages: event.ocr_pages ?? currentProgress[event.filename]?.ocr_pages,
+          total_pages: event.total_pages ?? currentProgress[event.filename]?.total_pages,
           error: event.error,
         },
       }))
@@ -203,7 +209,7 @@ function App() {
   const subscribeToJob = useCallback((jobId: string, filenames: string[]) => {
     if (eventSourcesRef.current.has(jobId)) return
 
-    const eventSource = new EventSource(`${API_BASE_URL}/documents/${jobId}/events`)
+    const eventSource = new EventSource(`${API_BASE_URL}/v1/documents/${jobId}/events`)
     eventSourcesRef.current.set(jobId, eventSource)
     let fallbackRequested = false
 
@@ -225,7 +231,7 @@ function App() {
       console.warn(`Progress stream unavailable | job_id=${jobId}`)
       if (fallbackRequested) return
       fallbackRequested = true
-      void fetch(`${API_BASE_URL}/documents/${jobId}/status`)
+      void fetch(`${API_BASE_URL}/v1/documents/${jobId}/status`)
         .then(async (response) => {
           if (response.status === 404) {
             markJobAsUnavailable(filenames)
@@ -293,7 +299,7 @@ function App() {
     selectedFiles.forEach((file) => formData.append('files', file))
 
     try {
-      const response = await fetch(`${API_BASE_URL}/documents/upload`, {
+      const response = await fetch(`${API_BASE_URL}/v1/documents/upload`, {
         method: 'POST',
         body: formData,
       })
@@ -461,7 +467,9 @@ function App() {
             const fileMessage = isCompleted
               ? `Terindeks · ${progress.indexed_chunks ?? 0} chunk`
               : progress?.message ?? 'Menunggu proses'
-            return <div className="file-row" key={file.name} aria-live="polite"><FileIcon /><span className="file-details"><strong>{file.name}</strong><small title={fileMessage}>{formatSize(file.size)} · {fileMessage}</small></span><span className={isCompleted ? 'uploaded-check' : isPending ? 'file-spinner' : 'file-failed'} aria-label={isCompleted ? 'Selesai' : isPending ? 'Sedang diproses' : 'Gagal'}>{isCompleted ? '✓' : isPending ? '' : '!'}</span><button className="remove-button" type="button" onClick={() => removeFile(file.name)} disabled={isPending} aria-label={`Remove ${file.name}`}>×</button></div>
+            const hasExtractionStats = progress?.native_pages !== undefined
+              && progress?.ocr_pages !== undefined
+            return <div className="file-row" key={file.name} aria-live="polite"><FileIcon /><span className="file-details"><strong>{file.name}</strong><small title={fileMessage}>{formatSize(file.size)} · {fileMessage}</small>{hasExtractionStats ? <span className="extraction-stats"><span>Native {progress.native_pages} halaman</span><span>OCR {progress.ocr_pages} halaman</span><span>Total {progress.total_pages ?? progress.native_pages! + progress.ocr_pages!}</span></span> : null}</span><span className={isCompleted ? 'uploaded-check' : isPending ? 'file-spinner' : 'file-failed'} aria-label={isCompleted ? 'Selesai' : isPending ? 'Sedang diproses' : 'Gagal'}>{isCompleted ? '✓' : isPending ? '' : '!'}</span><button className="remove-button" type="button" onClick={() => removeFile(file.name)} disabled={isPending} aria-label={`Remove ${file.name}`}>×</button></div>
           })}</div> : <p className="empty-state">No documents uploaded yet.</p>}
         </section>}
       </section>

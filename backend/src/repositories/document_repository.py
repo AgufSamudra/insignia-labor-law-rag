@@ -1,28 +1,22 @@
-"""Persistent SQLite registry for document identity and ingestion status."""
-
 from __future__ import annotations
 
 import hashlib
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Awaitable, Callable
+from typing import Any
+from uuid import uuid4
 
-
-@dataclass(frozen=True)
-class DocumentRecord:
-    document_hash: str
-    document_id: str
-    filename: str
-    ingestion_id: str
-    status: str
-    indexed_chunks: int | None
-    error: str | None
+from ..core.config import Settings
+from ..models.document_model import DocumentJob, DocumentRecord
+from .embedding_repository import DeepInfraEmbeddingRepository
+from .qdrant_repository import QdrantHttpClient, index_chunks
 
 
 def sha256_file(path: str | Path, *, block_size: int = 1024 * 1024) -> str:
-    """Return a stable SHA-256 fingerprint without loading the PDF into memory."""
+    """Return a stable SHA-256 fingerprint"""
     digest = hashlib.sha256()
     with Path(path).open("rb") as file:
         while block := file.read(block_size):
@@ -158,8 +152,87 @@ def get_document(
     return _record(row) if row is not None else None
 
 
+class DocumentRepository:
+    """Persist document state and chunks through injected storage clients."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        database_path: str | Path,
+        embedding_repository: DeepInfraEmbeddingRepository,
+        vector_repository: QdrantHttpClient,
+    ) -> None:
+        self.settings = settings
+        self.database_path = Path(database_path)
+        self.embedding_repository = embedding_repository
+        self.vector_repository = vector_repository
+        self.jobs: dict[str, DocumentJob] = {}
+
+    def create_job(self) -> DocumentJob:
+        job = DocumentJob(job_id=uuid4().hex)
+        self.jobs[job.job_id] = job
+        return job
+
+    def get_job(self, job_id: str) -> DocumentJob | None:
+        return self.jobs.get(job_id)
+
+    def hash_file(self, path: str | Path) -> str:
+        return sha256_file(path)
+
+    def reserve(
+        self,
+        *,
+        document_hash: str,
+        document_id: str,
+        filename: str,
+        ingestion_id: str,
+    ) -> DocumentRecord | None:
+        return reserve_document(
+            self.database_path,
+            document_hash=document_hash,
+            document_id=document_id,
+            filename=filename,
+            ingestion_id=ingestion_id,
+        )
+
+    def update_status(
+        self,
+        *,
+        document_hash: str,
+        ingestion_id: str,
+        status: str,
+        indexed_chunks: int | None = None,
+        error: str | None = None,
+    ) -> None:
+        update_document_status(
+            self.database_path,
+            document_hash=document_hash,
+            ingestion_id=ingestion_id,
+            status=status,
+            indexed_chunks=indexed_chunks,
+            error=error,
+        )
+
+    async def index(
+        self,
+        chunks: list[dict[str, Any]],
+        *,
+        ingestion_id: str,
+        on_progress: Callable[[str, int, int], Awaitable[None]] | None = None,
+    ) -> int:
+        return await index_chunks(
+            chunks,
+            self.embedding_repository,
+            self.vector_repository,
+            ingestion_id=ingestion_id,
+            batch_size=self.settings.embedding_batch_size,
+            on_progress=on_progress,
+        )
+
+
 __all__ = [
     "DocumentRecord",
+    "DocumentRepository",
     "get_document",
     "reserve_document",
     "sha256_file",

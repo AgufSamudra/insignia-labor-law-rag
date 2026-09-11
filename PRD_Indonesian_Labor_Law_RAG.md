@@ -122,8 +122,7 @@ flowchart LR
 
 ### FR-01 — Upload dokumen
 
-- Endpoint: `POST /documents/upload`.
-- Alias: `/upload_document` dan `/upload-documents`.
+- Endpoint: `POST /v1/documents/upload`.
 - Input berupa satu atau beberapa multipart file pada field `files`.
 - Backend memvalidasi ekstensi `.pdf` dan menyimpan file ke workspace sementara.
 - API langsung mengembalikan `job_id`; processing berjalan di background.
@@ -135,8 +134,8 @@ flowchart LR
 
 ### FR-02 — Progress ingestion
 
-- SSE: `GET /documents/{job_id}/events`.
-- Status fallback: `GET /documents/{job_id}/status`.
+- SSE: `GET /v1/documents/{job_id}/events`.
+- Status fallback: `GET /v1/documents/{job_id}/status`.
 - Stage: `upload`, `parsing`, `embedding`, `indexing`, `completed`, `failed`.
 - Progress page dan chunk ditampilkan oleh UI.
 - Job dan event history disimpan in-memory selama proses backend hidup.
@@ -391,7 +390,7 @@ query, retrieved chunk count, total query latency, dan errors. Exception provide
 serta Qdrant dikembalikan sebagai safe JSON error. Dokumen gagal diproses tidak
 menghentikan dokumen lain pada job yang sama.
 
-`GET /health` saat ini hanya merupakan liveness check dan tidak menguji Qdrant atau
+`GET /v1/health` saat ini hanya merupakan liveness check dan tidak menguji Qdrant atau
 DeepInfra.
 
 ## 13. Limitations aktual
@@ -456,9 +455,10 @@ DeepInfra.
 - `README.md`: setup, keputusan desain, trade-off, dan penggunaan aplikasi.
 - `pipeline-rag.txt`: detail ingestion pipeline.
 - `pipeline-user-query.txt`: detail query pipeline.
-- `backend/src/services/document_service.py`: extraction, OCR, cleaning, chunking.
-- `backend/src/services/document_registry.py`: SHA-256 dan SQLite ingestion registry.
-- `backend/src/services/query_service.py`: rewrite, retrieval, reranking, generation.
+- `backend/src/utils/document/document_utils.py`: extraction, OCR, cleaning, chunking.
+- `backend/src/utils/document/upload_pipeline_utils.py`: urutan upload sampai vector masuk Qdrant.
+- `backend/src/repositories/document_repository.py`: SHA-256 dan SQLite ingestion registry.
+- `backend/src/utils/query/query_utils.py`: rewrite, retrieval, reranking, generation.
 - `backend/src/repositories/qdrant_repository.py`: Qdrant indexing dan search.
 - `frontend/src/App.tsx`: upload, progress, query, rewritten query, sources, score.
 - `Technical Test - AI Engineer - Insignia.pdf`: sumber requirement technical test.

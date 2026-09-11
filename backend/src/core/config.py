@@ -1,5 +1,3 @@
-"""Application configuration loaded from environment variables."""
-
 from __future__ import annotations
 
 import os
@@ -10,15 +8,10 @@ from dotenv import load_dotenv
 
 try:
     from .errors import ConfigurationError
-except ImportError:  # Supports running this module directly from src/.
+except ImportError:
     from errors import ConfigurationError
 
-
-# Loading the backend/.env file makes local `uvicorn src.main:app` behave the
-# same as a deployment that injects environment variables. Existing variables
-# always win, which is important in containers and CI.
 load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=False)
-
 
 def _env_int(name: str, default: int) -> int:
     value = os.getenv(name)

@@ -1,5 +1,3 @@
-"""Console logging configuration for local development and deployments."""
-
 from __future__ import annotations
 
 import logging

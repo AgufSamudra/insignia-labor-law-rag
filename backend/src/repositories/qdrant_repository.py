@@ -1,5 +1,3 @@
-"""Small Qdrant REST client implemented with HTTPX."""
-
 from __future__ import annotations
 
 import logging
@@ -12,11 +10,11 @@ import httpx
 try:
     from ..core.config import Settings
     from ..core.errors import VectorStoreError
-    from ..services.embedding_service import Embedding
+    from ..models.query_model import Embedding
 except ImportError:  # Supports running this module directly from src/.
     from core.config import Settings
     from core.errors import VectorStoreError
-    from services.embedding_service import Embedding
+    from models.query_model import Embedding
 
 
 logger = logging.getLogger(__name__)

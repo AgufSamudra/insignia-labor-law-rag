@@ -1,5 +1,3 @@
-"""FastAPI exception handlers and centralized error logging."""
-
 from __future__ import annotations
 
 import logging

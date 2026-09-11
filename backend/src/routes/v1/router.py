@@ -1,20 +1,24 @@
-"""API route registry following the Kerjiva route layout."""
-
 from fastapi import APIRouter
 
-try:
-    from .documents import router as documents_router
-    from .query import router as query_router
-    from .system import router as system_router
-except ImportError:
-    from routes.v1.documents import router as documents_router
-    from routes.v1.query import router as query_router
-    from routes.v1.system import router as system_router
+from ...handlers.document_handler import DocumentHandler
+from ...handlers.query_handler import QueryHandler
+from ...handlers.system_handler import SystemHandler
+from .document import create_document_router
+from .query import create_query_router
+from .system import create_system_router
 
 
-api_router = APIRouter()
-api_router.include_router(system_router)
-api_router.include_router(query_router)
-api_router.include_router(documents_router)
+def create_api_router(
+    *,
+    system_handler: SystemHandler,
+    query_handler: QueryHandler,
+    document_handler: DocumentHandler,
+) -> APIRouter:
+    router = APIRouter(prefix="/v1")
+    router.include_router(create_system_router(system_handler))
+    router.include_router(create_query_router(query_handler))
+    router.include_router(create_document_router(document_handler))
+    return router
 
-__all__ = ["api_router"]
+
+__all__ = ["create_api_router"]

@@ -1,24 +1,16 @@
-"""System endpoint handlers."""
-
-from typing import Any
-
-
-async def root() -> dict[str, str]:
-    """Return basic information about the API."""
-    try:
-        from ..main import root as implementation
-    except ImportError:
-        from main import root as implementation
-    return await implementation()
+from ..models.system_model import HealthResponse, RootResponse
+from ..services.system_service import SystemService
 
 
-async def health_check() -> dict[str, str]:
-    """Simple health check for local development and deployments."""
-    try:
-        from ..main import health_check as implementation
-    except ImportError:
-        from main import health_check as implementation
-    return await implementation()
+class SystemHandler:
+    def __init__(self, service: SystemService) -> None:
+        self.service = service
+
+    async def root(self) -> RootResponse:
+        return await self.service.root()
+
+    async def health(self) -> HealthResponse:
+        return await self.service.health()
 
 
-__all__ = ["health_check", "root"]
+__all__ = ["SystemHandler"]

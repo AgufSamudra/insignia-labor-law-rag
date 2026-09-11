@@ -56,7 +56,7 @@ flowchart LR
     Result[Answer + citations]
 
     User --> UI
-    UI -->|POST /documents/upload| API
+    UI -->|POST /v1/documents/upload| API
     API --> Jobs
     Jobs --> PDF
     PDF -->|native text < 200 chars<br/>and image coverage >= 70%| OCR
@@ -96,9 +96,27 @@ flowchart LR
 | Generation | Model chat configurable via DeepInfra | Membuat jawaban Bahasa Indonesia dari context terpilih |
 | Deployment | Docker Compose + Nginx | Menjalankan frontend, backend, dan Qdrant dalam satu network |
 
+Backend memakai dependency injection eksplisit dengan alur yang sama untuk setiap
+domain endpoint:
+
+```text
+route -> handler -> service -> repository
+                     |
+                     +-> utils/<domain>/<domain>_utils.py
+```
+
+- `routes/v1`: hanya mendefinisikan path HTTP dan meneruskan request ke handler.
+- `handlers`: meneruskan input HTTP ke business operation pada service.
+- `services`: berisi fungsi yang langsung merepresentasikan endpoint.
+- `repositories`: mengisolasi akses SQLite, Qdrant, dan provider eksternal.
+- `models/*_model.py`: menyimpan dataclass dan request model per domain/tag.
+- `utils/query` dan `utils/document`: menyimpan seluruh fungsi pendukung domain;
+  pipeline upload bernomor berada di `utils/document/upload_pipeline_utils.py`.
+- `main.py`: composition root untuk config, dependency wiring, lifecycle, dan FastAPI.
+
 ## Alur ingestion dokumen
 
-1. Pengguna mengunggah PDF melalui `POST /documents/upload`.
+1. Pengguna mengunggah PDF melalui `POST /v1/documents/upload`.
 2. API menyimpan file ke workspace sementara, membuat `ingestion_id`, lalu segera
    mengembalikan `job_id`.
 3. Backend selalu mencoba native extraction. Full-page OCR hanya dijalankan bila
@@ -255,7 +273,7 @@ docker compose up --build
 Service tersedia pada:
 
 - frontend: <http://localhost:3000>
-- backend dan Swagger UI: <http://localhost:8000> dan <http://localhost:8000/docs>
+- backend dan Swagger UI: <http://localhost:8000/v1/> dan <http://localhost:8000/v1/docs>
 - Qdrant REST/dashboard: <http://localhost:6333> dan <http://localhost:6333/dashboard>
 
 Frontend Nginx meneruskan request `/v1` dan `/documents` ke backend. Di dalam
@@ -328,7 +346,7 @@ Apa isi Pasal 8 PP Nomor 35 Tahun 2021?
 ### Upload melalui API
 
 ```bash
-curl -X POST http://localhost:8000/documents/upload \
+curl -X POST http://localhost:8000/v1/documents/upload \
   -F 'files=@/path/to/1 UU No. 13 Tahun 2003 tentang Ketenagakerjaan.pdf' \
   -F 'files=@/path/to/2 PP No. 35 Tahun 2021 tentang PKWT, Alih Daya, Waktu Kerja, dan PHK.pdf'
 ```
@@ -356,13 +374,13 @@ boleh dicoba ulang.
 Pantau progress dengan SSE:
 
 ```bash
-curl -N http://localhost:8000/documents/<job-id>/events
+curl -N http://localhost:8000/v1/documents/<job-id>/events
 ```
 
 Riwayat status juga tersedia melalui:
 
 ```bash
-curl http://localhost:8000/documents/<job-id>/status
+curl http://localhost:8000/v1/documents/<job-id>/status
 ```
 
 ### Query melalui API
@@ -408,9 +426,9 @@ dan redaksi jawaban bergantung pada dokumen serta model yang digunakan.
 Endpoint system:
 
 ```text
-GET /          informasi dasar API
-GET /health    liveness check
-GET /docs      Swagger UI
+GET /v1/          informasi dasar API
+GET /v1/health    liveness check
+GET /v1/docs      Swagger UI
 ```
 
 ## Konfigurasi
@@ -507,7 +525,7 @@ memanggil generation.
 - Early scope filter menggunakan LLM sehingga dapat salah menilai query yang sangat
   ambigu atau terlalu pendek.
 - Job progress disimpan in-memory. Restart backend membuat history SSE lama hilang.
-- `/health` adalah liveness check dan belum memverifikasi DeepInfra atau Qdrant.
+- `/v1/health` adalah liveness check dan belum memverifikasi DeepInfra atau Qdrant.
 - Belum tersedia authentication, rate limiting, persistent conversation history,
   dan production job queue.
 - Retrieval dan generation masih bergantung pada koneksi serta availability

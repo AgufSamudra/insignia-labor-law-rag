@@ -1,6 +1,3 @@
-"""Application-specific exceptions used by the backend pipeline."""
-
-
 class InsigniaError(Exception):
     """Base class for expected application failures."""
 
