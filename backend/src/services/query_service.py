@@ -87,17 +87,12 @@ def normalize_query(query: str) -> str:
     return normalized
 
 
-def rewrite_if_ambiguous(query: str, *, enabled: bool = True) -> tuple[str, bool]:
-    """Add retrieval context only to very short or underspecified queries."""
+def rewrite_query(query: str) -> str:
+    """Add legal retrieval context to every query without replacing its intent."""
     normalized = normalize_query(query)
-    if not enabled:
-        return normalized, False
-    words = re.findall(r"[\wÀ-ÿ]+", normalized, flags=re.UNICODE)
-    if len(words) > 4:
-        return normalized, False
     if re.search(r"\bPasal\s+\d+|\bAyat\s+\d+", normalized, re.IGNORECASE):
-        return f"{normalized} ketentuan dalam peraturan ketenagakerjaan", True
-    return f"{normalized} menurut peraturan ketenagakerjaan Indonesia", True
+        return f"{normalized} ketentuan dalam peraturan ketenagakerjaan"
+    return f"{normalized} menurut peraturan ketenagakerjaan Indonesia"
 
 
 class DeepInfraQueryClient:
@@ -329,10 +324,7 @@ class QueryPipeline:
     async def run(self, query: str) -> QueryResult:
         started = time.perf_counter()
         normalized_query = normalize_query(query)
-        retrieval_query, was_rewritten = rewrite_if_ambiguous(
-            normalized_query,
-            enabled=self.settings.query_rewrite_enabled,
-        )
+        retrieval_query = rewrite_query(normalized_query)
         embedding = (await self.embedding_client.embed([retrieval_query]))[0]
 
         import asyncio
@@ -370,7 +362,7 @@ class QueryPipeline:
                 retrieval={
                     "query": query,
                     "normalized_query": normalized_query,
-                    "rewritten_query": retrieval_query if was_rewritten else None,
+                    "rewritten_query": retrieval_query,
                     "retrieved_chunks": 0,
                     "candidate_chunks": len(candidates),
                     "reranked_chunks": 0,
@@ -392,7 +384,7 @@ class QueryPipeline:
             retrieval={
                 "query": query,
                 "normalized_query": normalized_query,
-                "rewritten_query": retrieval_query if was_rewritten else None,
+                "rewritten_query": retrieval_query,
                 "retrieved_chunks": len(reranked),
                 "candidate_chunks": len(candidates),
                 "reranked_chunks": len(reranked),

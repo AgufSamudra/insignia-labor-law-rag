@@ -17,6 +17,7 @@ class PendingDocument:
     workspace: Path
     output_path: Path
     ingestion_id: str
+    document_hash: str
 
 
 class QueryRequest(BaseModel):

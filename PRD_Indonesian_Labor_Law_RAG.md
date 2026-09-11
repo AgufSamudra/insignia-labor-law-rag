@@ -1,580 +1,464 @@
-# PRD — Indonesian Labor Law RAG
+# PRD — Indonesian Labor Law RAG (Current Implementation)
 
-## 1. Product Overview
+## 1. Ringkasan produk
 
-Membangun **Retrieval-Augmented Generation (RAG)** yang menjawab pertanyaan tentang hukum ketenagakerjaan Indonesia berdasarkan dua dokumen sumber:
+Indonesian Labor Law RAG adalah aplikasi web dan REST API untuk menjawab
+pertanyaan hukum ketenagakerjaan Indonesia berdasarkan PDF yang diunggah pengguna.
+Corpus utama technical test terdiri dari:
 
-1. `UU No. 13 Tahun 2003 tentang Ketenagakerjaan`
-2. `PP No. 35 Tahun 2021 tentang PKWT, Alih Daya, Waktu Kerja, dan PHK`
+1. UU No. 13 Tahun 2003 tentang Ketenagakerjaan;
+2. PP No. 35 Tahun 2021 tentang PKWT, Alih Daya, Waktu Kerja, dan PHK.
 
-Sistem harus berjalan end-to-end dari **raw PDF → extraction/OCR → indexing → retrieval → answer generation**, dengan jawaban dalam **Bahasa Indonesia** dan sumber yang dapat ditelusuri.
+Sistem menjalankan alur raw PDF → native extraction/OCR → legal structure parsing →
+dense+sparse indexing → hybrid retrieval → reranking → grounded generation.
+Jawaban diberikan dalam Bahasa Indonesia dengan sumber yang dapat ditelusuri.
 
----
+Dokumen ini mendeskripsikan perilaku aplikasi yang sudah ada saat ini. Bagian
+limitations dan next improvements menjelaskan fitur yang belum diimplementasikan.
 
-## 2. Goal
+## 2. Tujuan produk
 
-Sistem harus:
+- Memproses native PDF dan scanned PDF melalui satu upload interface.
+- Mempertahankan nomor halaman serta struktur BAB, Pasal, dan Ayat.
+- Mengambil evidence yang relevan menggunakan dense dan sparse retrieval.
+- Menjawab hanya berdasarkan context hasil retrieval.
+- Menampilkan nama dokumen, halaman, struktur hukum, chunk, dan rerank score.
+- Menolak pertanyaan di luar hukum ketenagakerjaan.
+- Mengomunikasikan ketika evidence tidak mencukupi.
+- Dapat dijalankan dengan setup minimal menggunakan Docker Compose.
 
-- Menjawab pertanyaan berdasarkan isi dokumen, bukan pengetahuan bebas model.
-- Menghasilkan jawaban yang relevan dan akurat dalam Bahasa Indonesia.
-- Menampilkan minimal **nama dokumen dan nomor halaman** pada setiap sumber jawaban.
-- Menangani pertanyaan ambigu atau tidak lengkap dengan baik.
-- Memproses PDF native maupun scanned.
-- Mudah dijalankan oleh evaluator melalui interface yang sederhana.
-- Menyatakan keterbatasan ketika bukti dari dokumen tidak cukup.
+## 3. Pengguna dan use case
 
----
+### Pengguna utama
 
-## 3. Non-Goals
+Evaluator technical test atau pengguna yang ingin mencari informasi dalam dokumen
+hukum ketenagakerjaan yang diunggah.
 
-Tidak termasuk scope utama:
+### Use case utama
 
-- Legal advice atau keputusan hukum final.
-- Crawling regulasi dari internet.
-- Authentication / user management.
-- Dashboard admin.
-- Fine-tuning LLM.
-- Multi-tenant architecture.
-- Penyimpanan conversation history jangka panjang.
+1. Pengguna mengunggah satu atau beberapa PDF.
+2. Pengguna melihat progress parsing, embedding, dan indexing.
+3. Pengguna mengajukan pertanyaan dalam Bahasa Indonesia.
+4. Pengguna melihat query hasil rewrite, jawaban, serta sumber dan score-nya.
+5. Pengguna membuka sumber untuk memeriksa text chunk yang digunakan.
 
----
+## 4. Scope implementasi saat ini
 
-## 4. Users
+### Termasuk
 
-### Primary User
-Evaluator technical test yang akan memberikan pertanyaan terkait dua dokumen ketenagakerjaan.
+- React UI untuk upload dan query;
+- FastAPI REST API;
+- background ingestion dengan progress SSE;
+- native extraction dengan PyMuPDF;
+- OCR Tesseract Bahasa Indonesia;
+- text normalization dan repeated header/footer removal;
+- structure-aware legal chunking;
+- BGE-M3 dense dan sparse embedding melalui DeepInfra;
+- Qdrant named-vector storage dan search;
+- RRF fusion di application layer;
+- Qwen3 reranker melalui DeepInfra;
+- SHA-256 document registry melalui SQLite;
+- parent-context expansion pada tingkat Pasal;
+- grounded generation melalui configurable DeepInfra chat model;
+- citation dan insufficient-evidence response;
+- Dockerfile frontend/backend dan Docker Compose.
 
-### User Need
-User ingin mendapatkan jawaban yang:
+### Tidak termasuk
 
-- cepat dipahami;
-- langsung menjawab pertanyaan;
-- memiliki dasar dokumen;
-- dapat diverifikasi melalui citation.
+- authentication dan user management;
+- legal advice atau keputusan hukum final;
+- crawling regulasi dari internet;
+- persistent conversation history;
+- admin dashboard;
+- automatic document delete/replacement;
+- durable background job queue;
+- multi-tenant atau multi-replica deployment;
+- fine-tuning model;
+- automatic retrieval evaluation dashboard.
 
----
+## 5. Arsitektur aktual
 
-## 5. Functional Requirements
+```mermaid
+flowchart LR
+    User[User]
+    UI[React UI + Nginx]
+    API[FastAPI]
+    Registry[(SQLite document registry)]
+    Job[In-memory background job + SSE]
+    Extract[PyMuPDF page inspection]
+    OCR[Tesseract full-page OCR]
+    Parse[Cleaner + legal parser]
+    Embed[BGE-M3 dense + sparse]
+    Qdrant[(Qdrant)]
+    Scope[LLM scope filter]
+    Rewrite[Mandatory deterministic rewrite]
+    Search[Parallel dense + sparse search]
+    RRF[RRF fusion]
+    Rerank[Qwen3 reranker]
+    Parent[Pasal context expansion]
+    Generate[Chat model generation]
+    Answer[Answer + sources + scores]
 
-### FR-01 — PDF Ingestion
+    User --> UI
+    UI -->|upload PDF| API
+    API --> Registry
+    API --> Job --> Extract
+    Extract -->|native < 200 chars and<br/>largest image >= 70%| OCR --> Parse
+    Extract -->|otherwise native text| Parse
+    Parse --> Embed --> Qdrant
+    Job -. progress SSE .-> UI
 
-Sistem harus menerima kedua PDF sebagai source document.
+    UI -->|query| API --> Scope
+    Scope -->|in scope| Rewrite --> Embed
+    Embed --> Search
+    Qdrant --> Search
+    Search --> RRF --> Rerank --> Parent
+    Parent --> Qdrant
+    Parent --> Generate --> Answer --> UI
+    Scope -->|out of scope| Answer
+```
 
-Pipeline ingestion:
+## 6. Functional requirements aktual
+
+### FR-01 — Upload dokumen
+
+- Endpoint: `POST /documents/upload`.
+- Alias: `/upload_document` dan `/upload-documents`.
+- Input berupa satu atau beberapa multipart file pada field `files`.
+- Backend memvalidasi ekstensi `.pdf` dan menyimpan file ke workspace sementara.
+- API langsung mengembalikan `job_id`; processing berjalan di background.
+- Kegagalan satu file tidak menghentikan file lain dalam upload yang sama.
+- SHA-256 file disimpan pada SQLite document registry.
+- File identik dengan status queued, processing, atau completed ditolak. Jika
+  seluruh upload duplicate, API mengembalikan HTTP 409.
+- File yang ingestion sebelumnya failed boleh dicoba ulang.
+
+### FR-02 — Progress ingestion
+
+- SSE: `GET /documents/{job_id}/events`.
+- Status fallback: `GET /documents/{job_id}/status`.
+- Stage: `upload`, `parsing`, `embedding`, `indexing`, `completed`, `failed`.
+- Progress page dan chunk ditampilkan oleh UI.
+- Job dan event history disimpan in-memory selama proses backend hidup.
+
+### FR-03 — Extraction dan OCR
+
+- Native text selalu diekstrak terlebih dahulu.
+- Backend menghitung panjang native text yang sudah dirapikan dan coverage bounding
+  box image terbesar terhadap luas halaman.
+- Full-page OCR dipakai hanya jika native text kurang dari 200 karakter dan image
+  terbesar menutupi minimal 70% halaman.
+- Kondisi lainnya tetap menggunakan native text, termasuk halaman dengan image
+  header/footer kecil.
+- OCR memakai Tesseract language pack `ind`, 300 DPI, maksimal empat process worker.
+- Hasil parallel OCR dikumpulkan kembali dalam urutan halaman asli.
+- Kegagalan OCR atau dependency OCR membuat dokumen berstatus failed.
+
+### FR-04 — Cleaning dan legal structure parsing
+
+- Unicode dinormalisasi dengan NFKC.
+- Whitespace, control characters, soft hyphen, page marker, dan OCR noise tertentu
+  dibersihkan.
+- Header/footer yang berulang pada margin beberapa halaman dihapus.
+- Parser mengenali BAB, Bagian, Paragraf, Pasal, Ayat, dan heading PENJELASAN.
+- Teks sebelum Pasal tidak dibuat sebagai chunk.
+- Parsing berhenti pada heading PENJELASAN.
+
+### FR-05 — Chunking
+
+- Unit chunk adalah isi Pasal atau Ayat.
+- Panjang maksimal default 1.000 karakter dan dipotong pada batas kata.
+- Chunk panjang dibagi menjadi `part` berurutan tanpa overlap.
+- Page provenance setiap kata dipakai untuk membentuk `page_start`, `page_end`, dan
+  `pages`.
+- Chunk disimpan sebagai JSONL dan kemudian sebagai payload Qdrant.
+
+Schema chunk:
 
 ```text
-PDF
-↓
-Detect native/scanned page
-↓
-Text extraction / OCR
-↓
-Text normalization
-↓
-Structure detection
-↓
-Chunking
-↓
-Embedding + lexical indexing
-↓
-Vector / search database
+filename, bab, bab_title, pasal, ayat, part,
+page_start, page_end, pages, text, chunk_id
 ```
 
-Metadata minimal setiap chunk:
+### FR-06 — Dense dan sparse indexing
 
-```text
-document_id
-document_name
-page_number
-section
-article_number
-chunk_id
-text
-```
+- Model default: `BAAI/bge-m3-multi` melalui DeepInfra.
+- Request embedding mengaktifkan `dense=true`, `sparse=true`, `normalize=true`, dan
+  `colbert=false`.
+- Embedding diproses dengan bounded batch; default delapan chunk.
+- Qdrant collection memiliki named vector `dense` dengan Cosine distance dan named
+  vector `sparse` dengan IDF modifier.
+- Payload point menambahkan `point_id`, `ingestion_id`, dan `embedding_model`.
 
----
+### FR-07 — Query validation dan scope filter
 
-### FR-02 — Document Extraction
+- Endpoint: `POST /v1/query`.
+- Request body: `{"query": "..."}`.
+- Query memiliki panjang 1–2.000 karakter dan tidak boleh kosong setelah trim.
+- LLM scope filter berjalan sebelum embedding, retrieval, reranking, dan generation.
+- Query di luar hukum ketenagakerjaan mengembalikan jawaban penolakan dan sources
+  kosong.
 
-Sistem harus:
+### FR-08 — Mandatory query rewrite
 
-- menggunakan text extraction untuk native PDF;
-- menggunakan OCR untuk halaman scanned;
-- mempertahankan informasi nomor halaman;
-- membersihkan noise seperti repeated header/footer jika diperlukan;
-- tidak menghilangkan struktur hukum penting seperti:
-  - BAB
-  - Bagian
-  - Pasal
-  - Ayat
+- Setiap query yang lolos scope filter dinormalisasi dan di-rewrite.
+- Rewrite bersifat deterministic/rule-based, bukan panggilan LLM tambahan.
+- Query yang mengandung Pasal/Ayat ditambah konteks `ketentuan dalam peraturan
+  ketenagakerjaan`.
+- Query lain ditambah konteks `menurut peraturan ketenagakerjaan Indonesia`.
+- Rewrite hanya digunakan untuk embedding, retrieval, dan reranking.
+- Generation tetap menerima intent/query asli yang sudah dinormalisasi.
+- Hasil rewrite dikembalikan sebagai `retrieval.rewritten_query` dan ditampilkan UI
+  pada bagian `SYSTEM REWRITE`.
 
----
+### FR-09 — Hybrid retrieval dan fusion
 
-### FR-03 — Chunking
+- Satu dense search dan satu sparse search dijalankan paralel di Qdrant.
+- Masing-masing mengambil default 20 kandidat.
+- Hasil dideduplikasi berdasarkan `chunk_id` dan digabungkan dengan Reciprocal Rank
+  Fusion menggunakan default `RRF_K=60`.
+- Maksimal 20 hasil fusion dikirim ke reranker.
 
-Chunking harus **structure-aware**, bukan hanya fixed token splitting.
+### FR-10 — Reranking
 
-Prioritas boundary:
+- Model default: `Qwen/Qwen3-Reranker-4B` melalui DeepInfra.
+- Reranker menggunakan rewritten query.
+- Maksimal tujuh chunk dengan score tertinggi dipilih.
+- Chunk di bawah default `RERANK_MIN_SCORE=0.05` dibuang.
+- `rerank_score` dikembalikan untuk setiap source dan ditampilkan UI dengan enam
+  angka desimal.
 
-```text
-BAB → Bagian → Pasal → Ayat
-```
+### FR-11 — Parent-context expansion
 
-Chunk boleh memiliki overlap kecil apabila konteks antarbagian diperlukan.
+- Backend mengambil maksimal 64 point dari pasangan `filename + pasal` untuk setiap
+  hit yang lolos reranking.
+- Text disusun berdasarkan `chunk_id` dan dibatasi maksimal 6.000 karakter per
+  parent.
+- Bila expansion gagal, generation tetap memakai original reranked chunk.
+- Source response tetap berasal dari child chunk hasil reranking.
 
-Setiap chunk wajib tetap memiliki metadata sumber dan halaman.
+### FR-12 — Grounded answer generation
 
----
+- Jawaban menggunakan Bahasa Indonesia.
+- Prompt melarang penggunaan pengetahuan di luar context.
+- Prompt meminta marker citation `[1]`, `[2]`, dan seterusnya.
+- Thinking tag dan marker Markdown presentasional dibersihkan dari output.
+- Jika model tidak memberi citation marker, backend menambahkan daftar source marker.
 
-### FR-04 — Query Processing
+### FR-13 — Insufficient evidence
 
-Input utama:
-
-```json
-{
-  "query": "Berapa lama maksimal PKWT?"
-}
-```
-
-Sistem harus:
-
-1. menerima pertanyaan Bahasa Indonesia;
-2. mendeteksi query yang ambigu / terlalu pendek;
-3. melakukan query normalization atau rewrite bila membantu retrieval;
-4. mempertahankan intent asli user.
-
-Query rewrite tidak boleh mengubah makna pertanyaan.
-
----
-
-### FR-05 — Hybrid Retrieval
-
-Retrieval menggunakan kombinasi:
-
-- **Dense semantic retrieval**
-- **Sparse retrieval**
-
-Dense dan sparse representation dihasilkan menggunakan **BGE-M3** dan disimpan pada Qdrant sebagai hybrid index.
-Fusion hasil retrieval menggunakan metode seperti **Reciprocal Rank Fusion (RRF)** sebelum reranking.
-
-Tujuannya:
-
-- dense search menangkap kemiripan makna;
-- sparse retrieval menangkap keyword penting, istilah hukum, nomor pasal, singkatan, dan exact-term matching.
-
-Hasil dense dan sparse retrieval digabungkan sebelum reranking.
-
----
-
-### FR-06 — Reranking
-
-Candidate hasil hybrid retrieval harus direrank sebelum dikirim ke LLM.
-
-Target:
-
-```text
-Hybrid retrieval
-→ top 20–30 candidates
-→ reranker
-→ top 5–8 context chunks
-```
-
-Reranker harus mendukung Bahasa Indonesia / multilingual.
-
----
-
-### FR-07 — Answer Generation
-
-LLM hanya menjawab menggunakan retrieved context.
-
-Jawaban harus:
-
-- menggunakan Bahasa Indonesia;
-- langsung menjawab pertanyaan;
-- tidak mengarang informasi yang tidak ditemukan;
-- menjelaskan konflik atau ketidakcukupan informasi apabila terjadi;
-- menyertakan citation.
-
-Contoh:
-
-```text
-PKWT berdasarkan jangka waktu dapat dibuat paling lama 5 tahun,
-termasuk perpanjangannya.
-
-Sumber:
-- PP No. 35 Tahun 2021, Pasal 8, halaman 7
-```
-
----
-
-### FR-08 — Citation
-
-Setiap klaim utama yang berasal dari dokumen harus traceable.
-
-Citation minimal:
-
-```text
-document_name
-page_number
-```
-
-Jika tersedia, sertakan juga:
-
-```text
-BAB
-Pasal
-Ayat
-```
-
-Contoh response API:
-
-```json
-{
-  "answer": "....",
-  "sources": [
-    {
-      "document": "PP No. 35 Tahun 2021",
-      "page": 7,
-      "article": "Pasal 8",
-      "chunk_id": "pp35-p7-pasal8-01"
-    }
-  ]
-}
-```
-
----
-
-### FR-09 — Insufficient Evidence
-
-Jika retrieved context tidak cukup mendukung jawaban, sistem harus mengatakan bahwa informasi tidak ditemukan atau bukti belum cukup.
-
-Sistem **tidak boleh melakukan hallucination untuk mengisi gap**.
-
-Contoh:
+Jika tidak ada chunk yang melewati minimum rerank score, generation tidak dipanggil
+dan sistem mengembalikan:
 
 ```text
 Saya tidak menemukan dasar yang cukup pada dua dokumen yang tersedia
 untuk menjawab pertanyaan tersebut.
 ```
 
----
+### FR-14 — Source traceability pada UI
 
-### FR-10 — Query Interface
+Setiap source menampilkan:
 
-Interface minimum menggunakan **REST API**.
+- nama dokumen;
+- halaman awal dan akhir bila lintas halaman;
+- Pasal dan Ayat bila tersedia;
+- rerank score;
+- text child chunk yang dapat dibuka melalui elemen detail;
+- chunk ID pada response API.
 
-Required endpoint:
-
-```http
-POST /v1/query
-```
-
-Optional operational endpoint:
-
-```http
-GET /health
-```
-
-Contoh response:
+## 7. API response aktual
 
 ```json
 {
-  "answer": "...",
-  "sources": [...],
+  "answer": "Jawaban berdasarkan context [1].",
+  "sources": [
+    {
+      "id": 1,
+      "document": "2 PP No. 35 Tahun 2021.pdf",
+      "page": 7,
+      "page_end": 7,
+      "chapter": "II",
+      "article": "Pasal 8",
+      "paragraph": "Ayat 1",
+      "chunk_id": "pp35-pasal8-ayat1-part1",
+      "text": "...",
+      "rerank_score": 0.912345
+    }
+  ],
   "retrieval": {
-    "retrieved_chunks": 6
+    "query": "Berapa lama maksimal PKWT?",
+    "normalized_query": "Berapa lama maksimal PKWT?",
+    "rewritten_query": "Berapa lama maksimal PKWT? menurut peraturan ketenagakerjaan Indonesia",
+    "candidate_chunks": 20,
+    "reranked_chunks": 7,
+    "retrieved_chunks": 7,
+    "latency_ms": 1234.56
   }
 }
 ```
 
----
+Nilai response di atas merupakan contoh schema, bukan snapshot hasil model.
 
-## 6. Proposed Technical Stack
+## 8. Stack aktual
 
-| Component | Choice |
+| Area | Implementasi |
 |---|---|
-| Language | Python |
-| API | FastAPI |
+| Backend language | Python 3.10+ |
+| API | FastAPI + Uvicorn |
 | PDF extraction | PyMuPDF |
-| OCR fallback | OCR engine for scanned pages |
-| Embedding | BGE-M3 |
-| Sparse retrieval | BGE-M3 sparse embeddings |
-| Vector / search store | Qdrant |
-| Reranker | BGE Reranker v2 M3 |
-| LLM | Configurable via environment variable |
-| Containerization | Docker / Docker Compose |
+| OCR | Tesseract OCR `ind` |
+| Document registry | SQLite + SHA-256 |
+| HTTP client | HTTPX |
+| Embedding | BGE-M3 melalui DeepInfra |
+| Vector store | Qdrant 1.16.3 |
+| Fusion | Application-level RRF |
+| Reranker | Qwen3 Reranker melalui DeepInfra |
+| Generation | Configurable chat model melalui DeepInfra |
+| Frontend | React 19, TypeScript, Vite |
+| Web server | Nginx |
+| Package manager | uv dan npm |
+| Deployment | Docker Compose |
 
-### Why
+## 9. Configuration
 
-**BGE-M3**
-- multilingual;
-- cocok untuk semantic retrieval Bahasa Indonesia;
-- mendukung retrieval use case dengan dokumen panjang dan terminologi spesifik.
-
-**BGE Reranker v2 M3**
-- multilingual;
-- cross-encoder reranking meningkatkan precision kandidat setelah retrieval.
-
-**Hybrid Dense + Sparse**
-- dense retrieval menangkap semantic similarity dan paraphrase;
-- sparse retrieval memperkuat exact-term matching seperti nomor pasal, istilah hukum, dan singkatan;
-- BGE-M3 dipakai untuk menghasilkan dense dan sparse representation dalam satu model, sehingga pipeline lebih konsisten dan sederhana.
-
----
-
-## 7. High-Level Architecture
+Secret dan runtime configuration dibaca dari environment variable. Konfigurasi
+utama:
 
 ```text
-                ┌─────────────────┐
-                │   Source PDFs   │
-                └────────┬────────┘
-                         │
-                ┌────────▼────────┐
-                │ PDF Processor   │
-                │ Extract / OCR   │
-                └────────┬────────┘
-                         │
-                ┌────────▼────────┐
-                │ Structure-aware │
-                │    Chunking     │
-                └────────┬────────┘
-                         │
-              ┌──────────▼──────────┐
-              │ Dense + Sparse Index │
-              │      Indexing       │
-              └──────────┬──────────┘
-                         │
-                    ┌────▼────┐
-                    │ Qdrant  │
-                    └────┬────┘
-                         │
-User Query               │
-    │                    │
-    ▼                    │
-Query Processing         │
-    │                    │
-    └──────► Hybrid Retrieval
-                    │
-                    ▼
-                 Reranker
-                    │
-                    ▼
-              Context Builder
-                    │
-                    ▼
-                   LLM
-                    │
-                    ▼
-          Answer + Source Citation
+DEEPINFRA_API_KEY
+DEEPINFRA_BASE_URL
+EMBEDDING_MODEL
+RERANKED_MODEL
+GENERATIVE_MODEL
+QDRANT_HOST
+QDRANT_API_KEY
+QDRANT_COLLECTION
+EMBEDDING_BATCH_SIZE
+HTTP_TIMEOUT_SECONDS
+RETRIEVAL_LIMIT
+RERANK_TOP_K
+RRF_K
+RERANK_MIN_SCORE
+GENERATION_MAX_TOKENS
+LOG_LEVEL
 ```
 
----
+`backend/.env.example` menyediakan contoh nilai. File `.env` tidak masuk Git.
 
-## 8. Retrieval Pipeline
+## 10. Deployment aktual
 
-```text
-User Query
-↓
-Normalize query
-↓
-Optional query rewrite
-↓
-Dense retrieval ─────┐
-                     ├─→ Fusion
-Sparse retrieval ─────┘
-↓
-Top candidates
-↓
-Cross-encoder reranking
-↓
-Top relevant chunks
-↓
-Context assembly
-↓
-LLM answer generation
-↓
-Citation validation
-↓
-Final response
-```
+`docker-compose.yml` menjalankan tiga service dalam satu bridge network:
 
----
+- `frontend`: static React build melalui Nginx pada port 3000;
+- `backend`: FastAPI pada port 8000;
+- `qdrant`: REST 6333 dan gRPC 6334.
 
-## 9. Quality Requirements
+Named volume:
 
-### Retrieval
+- `qdrant_data` untuk index Qdrant;
+- `backend_data` untuk JSONL dan runtime upload workspace.
 
-Target utama adalah **relevance**, bukan sekadar mengambil banyak chunk.
+Backend dan frontend memiliki healthcheck. Backend menunggu Qdrant sehat, sedangkan
+frontend menunggu backend sehat.
 
-Evaluasi retrieval minimal dilakukan menggunakan kumpulan pertanyaan manual yang mencakup:
+## 11. Test coverage aktual
 
-- pertanyaan exact;
-- pertanyaan paraphrase;
-- pertanyaan berbasis Pasal;
-- pertanyaan ambigu;
-- pertanyaan yang membutuhkan lebih dari satu chunk;
-- pertanyaan yang tidak memiliki jawaban.
+Backend memakai `unittest` dan mock HTTP transport. Test yang tersedia mencakup:
 
-### Generation
+- text normalization serta repeated margin removal;
+- native-first 200-character dan 70%-image OCR decision;
+- SHA-256 registry, duplicate detection, failed-ingestion retry, dan HTTP 409;
+- deterministic ordering hasil parallel OCR;
+- chunk ID uniqueness;
+- sparse vector parsing;
+- hybrid Qdrant collection dan batched indexing;
+- duplicate chunk ID rejection dalam satu ingestion;
+- query normalization dan mandatory rewrite;
+- RRF fusion;
+- reranker request/response;
+- scope filtering;
+- insufficient evidence;
+- parent-context query pipeline;
+- progress SSE.
 
-Jawaban dinilai dari:
+Frontend diverifikasi melalui ESLint, TypeScript build, dan Vite production build.
+Belum ada automated browser test dan full external-provider end-to-end test.
 
-- correctness;
-- groundedness;
-- relevance;
-- citation correctness;
-- kemampuan menyatakan keterbatasan.
+## 12. Observability dan failure behavior
 
----
+Log stdout mencakup document job/stage, embedding request, collection/upsert,
+query, retrieved chunk count, total query latency, dan errors. Exception provider
+serta Qdrant dikembalikan sebagai safe JSON error. Dokumen gagal diproses tidak
+menghentikan dokumen lain pada job yang sama.
 
-## 10. Non-Functional Requirements
+`GET /health` saat ini hanya merupakan liveness check dan tidak menguji Qdrant atau
+DeepInfra.
 
-### NFR-01 — Reproducibility
+## 13. Limitations aktual
 
-Project harus dapat dijalankan dari repository dengan setup minimal.
+1. Page extraction memakai threshold statis 200 karakter dan 70% image coverage;
+   belum ada language-quality atau OCR-confidence scoring.
+2. OCR belum memiliki preprocessing, deskew, orientation correction, atau confidence
+   threshold.
+3. Parser mengandalkan heading hukum yang muncul sebagai baris tersendiri dan
+   berhenti sebelum bagian PENJELASAN.
+4. Chunking tidak memakai overlap.
+5. Parent expansion memfilter `filename + pasal`, belum memakai document version
+   atau ingestion ID.
+6. File identik ditolak dengan SHA-256, tetapi revisi dengan isi berbeda belum
+   otomatis menggantikan versi dokumen sebelumnya.
+7. Source child dapat berbeda dari bagian parent context yang dipakai generation;
+   citation validation per klaim belum tersedia.
+8. Scope filter dapat salah menilai query sangat ambigu.
+9. Rerank score adalah score model, bukan probabilitas relevansi terkalibrasi.
+10. Job state hilang ketika backend restart.
+11. Qdrant kosong pada fresh install sampai pengguna mengunggah corpus.
+12. Sistem bergantung pada koneksi, availability, latency, dan biaya DeepInfra.
+13. Belum ada benchmark retrieval dan citation correctness untuk kedua corpus.
 
-Target:
+## 14. Next improvements
 
-```bash
-docker compose up
-```
+1. Menambah native-text quality dan OCR-confidence scoring pada page classifier.
+2. Semantic document versioning dan atomic replace untuk revisi dokumen.
+3. Explicit parent-child records dan citation provenance dari exact context span.
+4. Evaluation dataset untuk exact, paraphrase, Pasal, ambiguous, multi-chunk, dan
+   unanswerable queries.
+5. Recall@k, MRR/nDCG, groundedness, serta citation-correctness metrics.
+6. Durable queue/job storage, readiness check, dan request-level tracing.
+7. Browser integration test dan clean-environment Docker end-to-end test.
 
-atau langkah yang setara dan terdokumentasi dengan jelas.
+## 15. Acceptance snapshot
 
-### NFR-02 — Configuration
+| Criteria | Status saat ini |
+|---|---|
+| Raw native PDF processing | Implemented |
+| Scanned PDF OCR | Implemented dengan native-first 200-char/70%-coverage heuristic |
+| Legal structure chunking | Implemented untuk BAB/Pasal/Ayat |
+| Page metadata | Implemented |
+| Dense retrieval | Implemented |
+| Sparse retrieval | Implemented |
+| RRF fusion | Implemented |
+| Reranking | Implemented |
+| Mandatory query rewrite | Implemented |
+| Rewrite ditampilkan di UI | Implemented |
+| Source rerank score di UI | Implemented |
+| Exact-file duplicate rejection | Implemented dengan SHA-256 dan SQLite |
+| Bahasa Indonesia generation | Implemented |
+| Insufficient-evidence response | Implemented |
+| REST API dan UI | Implemented |
+| Docker Compose | Implemented; clean-machine E2E tetap perlu diverifikasi |
+| Retrieval benchmark | Not implemented |
+| Exact citation validation | Not implemented |
+| Automatic revised-document replacement | Not implemented |
 
-Secret dan konfigurasi tidak boleh hardcoded.
+## 16. Referensi implementasi
 
-Gunakan:
-
-```text
-.env
-.env.example
-```
-
-### NFR-03 — Observability
-
-Minimal log:
-
-```text
-request_id
-query
-retrieval latency
-generation latency
-retrieved chunk ids
-errors
-```
-
-### NFR-04 — Maintainability
-
-Pisahkan minimal:
-
-```text
-ingestion
-retrieval
-reranking
-generation
-api
-config
-```
-
-### NFR-05 — Failure Handling
-
-Sistem harus menangani:
-
-- PDF extraction gagal;
-- OCR gagal;
-- embedding service gagal;
-- vector database unavailable;
-- LLM unavailable;
-- empty retrieval result.
-
----
-
-## 11. Suggested Repository Structure
-
-```text
-.
-├── app/
-│   ├── api/
-│   ├── ingestion/
-│   ├── retrieval/
-│   ├── reranking/
-│   ├── generation/
-│   ├── models/
-│   └── config/
-│
-├── data/
-│   └── raw/
-│
-├── scripts/
-│   └── ingest.py
-│
-├── tests/
-│   ├── unit/
-│   └── evaluation/
-│
-├── docs/
-│   └── architecture.md
-│
-├── docker-compose.yml
-├── Dockerfile
-├── .env.example
-├── README.md
-└── pyproject.toml
-```
-
----
-
-## 12. Acceptance Criteria
-
-Project dianggap selesai ketika:
-
-- [ ] Kedua PDF dapat diproses dari raw document.
-- [ ] Native PDF dan scanned PDF memiliki handling yang jelas.
-- [ ] Dokumen berhasil di-chunk dan di-index.
-- [ ] Metadata halaman tetap tersedia setelah indexing.
-- [ ] Dense retrieval berjalan.
-- [ ] Sparse retrieval berjalan.
-- [ ] Hybrid dense + sparse retrieval berjalan.
-- [ ] Reranking berjalan.
-- [ ] REST API dapat menerima query.
-- [ ] Jawaban dihasilkan dalam Bahasa Indonesia.
-- [ ] Jawaban menyertakan nama dokumen dan nomor halaman.
-- [ ] Sistem tidak menjawab secara yakin ketika evidence tidak cukup.
-- [ ] README menjelaskan architecture, decisions, trade-offs, limitations, next improvements, dan cara menjalankan sistem.
-- [ ] Architecture diagram tersedia.
-- [ ] Repository dapat dijalankan evaluator dengan setup minimal.
-
----
-
-## 13. Required Deliverables
-
-### 1. Public GitHub Repository
-
-Berisi source code dan seluruh file yang dibutuhkan untuk menjalankan sistem.
-
-### 2. README
-
-README wajib menjelaskan:
-
-- system architecture;
-- design decisions;
-- trade-offs;
-- limitations;
-- next improvements;
-- cara menjalankan project;
-- cara menggunakan query interface;
-- penggunaan agentic coding tools jika digunakan.
-
-### 3. Architecture Diagram
-
-Format bebas, misalnya Mermaid atau draw.io.
-
-Diagram harus sesuai dengan implementasi aktual.
-
----
-
-## 14. Definition of Done
-
-Sistem dapat dijalankan oleh evaluator, menerima pertanyaan terhadap dua regulasi yang diberikan, mengambil evidence yang relevan, menghasilkan jawaban Bahasa Indonesia yang grounded, dan memberikan citation yang dapat diverifikasi hingga minimal nama dokumen dan halaman.
+- `README.md`: setup, keputusan desain, trade-off, dan penggunaan aplikasi.
+- `pipeline-rag.txt`: detail ingestion pipeline.
+- `pipeline-user-query.txt`: detail query pipeline.
+- `backend/src/services/document_service.py`: extraction, OCR, cleaning, chunking.
+- `backend/src/services/document_registry.py`: SHA-256 dan SQLite ingestion registry.
+- `backend/src/services/query_service.py`: rewrite, retrieval, reranking, generation.
+- `backend/src/repositories/qdrant_repository.py`: Qdrant indexing dan search.
+- `frontend/src/App.tsx`: upload, progress, query, rewritten query, sources, score.
+- `Technical Test - AI Engineer - Insignia.pdf`: sumber requirement technical test.

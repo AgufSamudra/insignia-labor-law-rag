@@ -1,10 +1,13 @@
 import json
 import logging
+import multiprocessing
+import os
 import re
 import shutil
 import subprocess
 import unicodedata
 from collections import defaultdict
+from concurrent.futures import Future, ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -18,7 +21,13 @@ logger = logging.getLogger(__name__)
 MAX_CHARS = 1000
 OCR_LANGUAGE = "ind"
 OCR_DPI = 300
+OCR_MAX_WORKERS = 4
+NATIVE_TEXT_MIN_CHARS = 200
+IMAGE_COVERAGE_THRESHOLD = 0.70
 MARGIN_SCAN_LINES = 5
+
+
+_OCR_WORKER_DOCUMENT: Any | None = None
 
 
 @dataclass
@@ -74,6 +83,51 @@ def _get_page_image_infos(page: Any, page_number: int) -> list[Any]:
         ) from error
 
 
+def _normalized_text_length(text: str) -> int:
+    """Count readable native characters after collapsing PDF whitespace."""
+    return len(re.sub(r"\s+", " ", text).strip())
+
+
+def _largest_image_coverage(page: Any, image_infos: list[Any]) -> float:
+    """Return the largest image bounding-box area relative to the PDF page."""
+    if not image_infos:
+        return 0.0
+    page_rect = pymupdf.Rect(page.rect)
+    page_area = page_rect.get_area()
+    if page_area <= 0:
+        return 0.0
+
+    largest_area = 0.0
+    for image_info in image_infos:
+        if not isinstance(image_info, dict) or image_info.get("bbox") is None:
+            continue
+        try:
+            image_rect = pymupdf.Rect(image_info["bbox"])
+            visible_rect = image_rect & page_rect
+            largest_area = max(largest_area, visible_rect.get_area())
+        except (TypeError, ValueError):
+            continue
+    return min(1.0, largest_area / page_area)
+
+
+def should_use_full_page_ocr(
+    page: Any,
+    native_text: str,
+    image_infos: list[Any],
+    *,
+    native_text_min_chars: int = NATIVE_TEXT_MIN_CHARS,
+    image_coverage_threshold: float = IMAGE_COVERAGE_THRESHOLD,
+) -> tuple[bool, int, float]:
+    """Classify a page using native text quality and largest-image coverage."""
+    native_chars = _normalized_text_length(native_text)
+    image_coverage = _largest_image_coverage(page, image_infos)
+    use_ocr = (
+        native_chars < native_text_min_chars
+        and image_coverage >= image_coverage_threshold
+    )
+    return use_ocr, native_chars, image_coverage
+
+
 def extract_page_text(
     page: Any,
     page_number: int,
@@ -82,18 +136,33 @@ def extract_page_text(
     ocr_dpi: int = OCR_DPI,
     image_infos: list[Any] | None = None,
 ) -> str:
-    """Use native text for text-only pages and full OCR for pages with images."""
+    """Prefer native text and OCR only low-text pages dominated by an image."""
     if image_infos is None:
         image_infos = _get_page_image_infos(page, page_number)
 
-    if not image_infos:
-        logger.info("Native text extraction | page=%d", page_number)
-        return page.get_text("text", sort=True)
+    native_text = page.get_text("text", sort=True)
+    use_ocr, native_chars, image_coverage = should_use_full_page_ocr(
+        page,
+        native_text,
+        image_infos,
+    )
+    if not use_ocr:
+        logger.info(
+            "Native text extraction | page=%d native_chars=%d "
+            "largest_image_coverage=%.3f",
+            page_number,
+            native_chars,
+            image_coverage,
+        )
+        return native_text
 
     logger.info(
-        "OCR started | page=%d images=%d",
+        "OCR started | page=%d images=%d native_chars=%d "
+        "largest_image_coverage=%.3f",
         page_number,
         len(image_infos),
+        native_chars,
+        image_coverage,
     )
     try:
         text_page = page.get_textpage_ocr(
@@ -111,6 +180,56 @@ def extract_page_text(
             f"Full-page OCR tidak menghasilkan teks pada halaman {page_number}"
         )
     return ocr_text
+
+
+def _initialize_ocr_worker(pdf_path: str) -> None:
+    """Open one process-local PDF and keep Tesseract single-threaded per worker."""
+    global _OCR_WORKER_DOCUMENT
+    os.environ.setdefault("OMP_THREAD_LIMIT", "1")
+    _OCR_WORKER_DOCUMENT = pymupdf.open(pdf_path)
+
+
+def _extract_ocr_page_in_worker(
+    page_number: int,
+    ocr_language: str,
+    ocr_dpi: int,
+) -> str:
+    """OCR one page without sharing a PyMuPDF document between processes."""
+    if _OCR_WORKER_DOCUMENT is None:
+        raise RuntimeError("OCR worker belum memiliki dokumen PDF")
+
+    page = _OCR_WORKER_DOCUMENT[page_number - 1]
+    image_infos = _get_page_image_infos(page, page_number)
+    return extract_page_text(
+        page,
+        page_number,
+        ocr_language=ocr_language,
+        ocr_dpi=ocr_dpi,
+        image_infos=image_infos,
+    )
+
+
+def _collect_page_results_in_order(
+    total_pages: int,
+    native_page_texts: dict[int, str],
+    ocr_page_futures: dict[int, Future[str]],
+    on_page_progress: Callable[[int, int, str], None] | None = None,
+) -> list[tuple[int, str]]:
+    """Resolve parallel OCR into deterministic page order before stateful parsing."""
+    pages: list[tuple[int, str]] = []
+    for page_number in range(1, total_pages + 1):
+        if page_number in ocr_page_futures:
+            text = ocr_page_futures[page_number].result()
+            extraction_mode = "full_ocr"
+        else:
+            text = native_page_texts[page_number]
+            extraction_mode = "native_text"
+
+        pages.append((page_number, text))
+        if on_page_progress is not None:
+            on_page_progress(page_number, total_pages, extraction_mode)
+
+    return pages
 
 
 def _normalize_line(raw_line: str) -> str:
@@ -452,41 +571,83 @@ def process_pdf_document(
     *,
     ocr_language: str = OCR_LANGUAGE,
     ocr_dpi: int = OCR_DPI,
+    ocr_max_workers: int = OCR_MAX_WORKERS,
     max_chars: int = MAX_CHARS,
     on_page_progress: Callable[[int, int, str], None] | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract, parse, and optionally persist one PDF as structured JSONL chunks."""
+    """Extract pages concurrently, then parse them sequentially in page order."""
     pdf_file = Path(pdf_path)
     if not pdf_file.is_file():
         raise FileNotFoundError(f"PDF tidak ditemukan: {pdf_file}")
     if pdf_file.suffix.lower() != ".pdf":
         raise ValueError("File yang diproses harus berformat PDF")
+    if ocr_max_workers < 1:
+        raise ValueError("Jumlah OCR worker minimal 1")
 
-    pages: list[tuple[int, str]] = []
-    ocr_dependencies_validated = False
+    native_page_texts: dict[int, str] = {}
+    ocr_pages: list[int] = []
 
     with pymupdf.open(pdf_file) as document:
         total_pages = len(document)
         for page_number, page in enumerate(document, start=1):
             image_infos = _get_page_image_infos(page, page_number)
-            if image_infos and not ocr_dependencies_validated:
-                validate_ocr_dependencies(ocr_language)
-                ocr_dependencies_validated = True
-            pages.append(
-                (
-                    page_number,
-                    extract_page_text(
-                        page,
-                        page_number,
-                        ocr_language=ocr_language,
-                        ocr_dpi=ocr_dpi,
-                        image_infos=image_infos,
-                    ),
-                )
+            native_text = page.get_text("text", sort=True)
+            use_ocr, native_chars, image_coverage = should_use_full_page_ocr(
+                page,
+                native_text,
+                image_infos,
             )
-            if on_page_progress is not None:
-                extraction_mode = "full_ocr" if image_infos else "native_text"
-                on_page_progress(page_number, total_pages, extraction_mode)
+            if use_ocr:
+                logger.info(
+                    "Page scheduled for OCR | page=%d native_chars=%d "
+                    "largest_image_coverage=%.3f",
+                    page_number,
+                    native_chars,
+                    image_coverage,
+                )
+                ocr_pages.append(page_number)
+                continue
+            logger.info(
+                "Native text extraction | page=%d native_chars=%d "
+                "largest_image_coverage=%.3f",
+                page_number,
+                native_chars,
+                image_coverage,
+            )
+            native_page_texts[page_number] = native_text
+
+    if ocr_pages:
+        validate_ocr_dependencies(ocr_language)
+        worker_count = min(ocr_max_workers, len(ocr_pages))
+        spawn_context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=spawn_context,
+            initializer=_initialize_ocr_worker,
+            initargs=(str(pdf_file),),
+        ) as executor:
+            ocr_page_futures = {
+                page_number: executor.submit(
+                    _extract_ocr_page_in_worker,
+                    page_number,
+                    ocr_language,
+                    ocr_dpi,
+                )
+                for page_number in ocr_pages
+            }
+            pages = _collect_page_results_in_order(
+                total_pages,
+                native_page_texts,
+                ocr_page_futures,
+                on_page_progress,
+            )
+    else:
+        pages = _collect_page_results_in_order(
+            total_pages,
+            native_page_texts,
+            {},
+            on_page_progress,
+        )
 
     chunks = parse_document_pages(
         pages,

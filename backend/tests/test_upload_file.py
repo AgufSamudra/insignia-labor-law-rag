@@ -1,6 +1,7 @@
 import unittest
 
 from src.services.document_service import (
+    _collect_page_results_in_order,
     clean_document_pages,
     clean_page_lines,
     extract_page_text,
@@ -41,6 +42,48 @@ class TestTextCleaning(unittest.TestCase):
 
 
 class TestPageExtraction(unittest.TestCase):
+    def test_parallel_ocr_results_are_collected_in_page_order(self):
+        class CompletedOcr:
+            def __init__(self, text):
+                self.text = text
+
+            def result(self):
+                return self.text
+
+        progress = []
+        pages = _collect_page_results_in_order(
+            3,
+            {2: "lanjutan halaman kedua"},
+            {
+                3: CompletedOcr("Pasal 2\n(1) halaman ketiga"),
+                1: CompletedOcr("Pasal 1\n(1) halaman pertama"),
+            },
+            lambda current, total, mode: progress.append((current, total, mode)),
+        )
+
+        self.assertEqual(
+            pages,
+            [
+                (1, "Pasal 1\n(1) halaman pertama"),
+                (2, "lanjutan halaman kedua"),
+                (3, "Pasal 2\n(1) halaman ketiga"),
+            ],
+        )
+        self.assertEqual(
+            progress,
+            [
+                (1, 3, "full_ocr"),
+                (2, 3, "native_text"),
+                (3, 3, "full_ocr"),
+            ],
+        )
+
+        chunks = parse_document_pages(pages, filename="aturan.pdf")
+        self.assertEqual(
+            chunks[0]["text"],
+            "halaman pertama lanjutan halaman kedua",
+        )
+
     def test_uses_native_text_without_running_ocr_when_page_has_no_image(self):
         class TextOnlyPage:
             def __init__(self):
@@ -67,23 +110,24 @@ class TestPageExtraction(unittest.TestCase):
         self.assertEqual(extract_page_text(page, 1), "Pasal 1")
         self.assertFalse(page.ocr_called)
 
-    def test_uses_only_full_page_ocr_when_page_has_an_image(self):
+    def test_uses_full_page_ocr_for_low_text_page_with_large_image(self):
         class ImagePage:
             def __init__(self):
+                self.rect = (0, 0, 100, 100)
                 self.ocr_arguments = None
                 self.ocr_textpage = object()
 
             def get_image_info(self):
-                return [{"xref": 1}]
+                return [{"xref": 1, "bbox": (0, 0, 100, 100)}]
 
             def get_textpage_ocr(self, **kwargs):
                 self.ocr_arguments = kwargs
                 return self.ocr_textpage
 
             def get_text(self, _format, **kwargs):
-                if kwargs.get("textpage") is not self.ocr_textpage:
-                    raise AssertionError("Halaman image tidak boleh memakai native text")
-                return "Pasal 2 hasil OCR"
+                if kwargs.get("textpage") is self.ocr_textpage:
+                    return "Pasal 2 hasil OCR"
+                return ""
 
         page = ImagePage()
 
@@ -92,6 +136,56 @@ class TestPageExtraction(unittest.TestCase):
             page.ocr_arguments,
             {"language": "ind", "dpi": 300, "full": True},
         )
+
+    def test_keeps_native_text_when_header_image_covers_less_than_70_percent(self):
+        class NativePageWithHeader:
+            rect = (0, 0, 100, 100)
+
+            def __init__(self):
+                self.ocr_called = False
+
+            @staticmethod
+            def get_image_info():
+                return [{"xref": 1, "bbox": (0, 0, 100, 15)}]
+
+            def get_textpage_ocr(self, **_kwargs):
+                self.ocr_called = True
+                raise AssertionError("Gambar header kecil tidak boleh memicu OCR")
+
+            @staticmethod
+            def get_text(_format, **_kwargs):
+                return "Pasal 1\nTeks native singkat"
+
+        page = NativePageWithHeader()
+
+        self.assertEqual(extract_page_text(page, 1), "Pasal 1\nTeks native singkat")
+        self.assertFalse(page.ocr_called)
+
+    def test_keeps_native_text_above_200_chars_even_with_full_page_image(self):
+        native_text = "Pasal 1\n" + ("ketenagakerjaan " * 20)
+
+        class NativePageWithBackground:
+            rect = (0, 0, 100, 100)
+
+            def __init__(self):
+                self.ocr_called = False
+
+            @staticmethod
+            def get_image_info():
+                return [{"xref": 1, "bbox": (0, 0, 100, 100)}]
+
+            def get_textpage_ocr(self, **_kwargs):
+                self.ocr_called = True
+                raise AssertionError("Native text yang cukup tidak boleh memicu OCR")
+
+            @staticmethod
+            def get_text(_format, **_kwargs):
+                return native_text
+
+        page = NativePageWithBackground()
+
+        self.assertEqual(extract_page_text(page, 1), native_text)
+        self.assertFalse(page.ocr_called)
 
 
 class TestChunkIdentity(unittest.TestCase):

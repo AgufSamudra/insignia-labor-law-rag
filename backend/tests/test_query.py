@@ -13,7 +13,7 @@ from src.services.query_service import (
     clean_answer,
     fuse_rrf,
     normalize_query,
-    rewrite_if_ambiguous,
+    rewrite_query,
     strip_thinking,
 )
 
@@ -120,13 +120,15 @@ class TestQueryHelpers(unittest.TestCase):
     def test_normalizes_legal_references(self):
         self.assertEqual(normalize_query("  pasal8   ayat (1)  "), "Pasal 8 Ayat 1")
 
-    def test_only_short_query_is_rewritten(self):
-        rewritten, changed = rewrite_if_ambiguous("Pasal 8")
-        self.assertTrue(changed)
+    def test_every_query_is_rewritten_without_changing_its_intent(self):
+        rewritten = rewrite_query("Pasal 8")
         self.assertIn("ketentuan", rewritten)
-        unchanged, changed = rewrite_if_ambiguous("Berapa lama maksimal PKWT menurut PP 35?")
-        self.assertFalse(changed)
-        self.assertEqual(unchanged, "Berapa lama maksimal PKWT menurut PP 35?")
+        long_rewrite = rewrite_query("Berapa lama maksimal PKWT menurut PP 35?")
+        self.assertEqual(
+            long_rewrite,
+            "Berapa lama maksimal PKWT menurut PP 35? "
+            "menurut peraturan ketenagakerjaan Indonesia",
+        )
 
     def test_rrf_merges_same_chunk_from_both_searches(self):
         dense = [{"id": "a", "score": 0.9, "payload": {"chunk_id": "a", "text": "A"}}]
@@ -161,6 +163,10 @@ class TestQueryPipeline(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.sources[0]["document"], "PP No. 35 Tahun 2021.pdf")
         self.assertEqual(result.sources[0]["page"], 7)
         self.assertEqual(result.retrieval["reranked_chunks"], 2)
+        self.assertEqual(
+            result.retrieval["rewritten_query"],
+            "Berapa lama maksimal PKWT? menurut peraturan ketenagakerjaan Indonesia",
+        )
         self.assertIn("[1]", result.answer)
 
     async def test_returns_insufficient_evidence_without_generation(self):

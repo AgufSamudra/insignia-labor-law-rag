@@ -18,6 +18,11 @@ try:
     from .prompt.query_prompt import OUT_OF_SCOPE_ANSWER
     from .repositories.qdrant_repository import QdrantHttpClient, index_chunks
     from .services.document_service import make_document_id, process_pdf_document
+    from .services.document_registry import (
+        reserve_document,
+        sha256_file,
+        update_document_status,
+    )
     from .services.embedding_service import DeepInfraEmbeddingClient
     from .services.progress_service import (
         STAGE_MESSAGES,
@@ -38,6 +43,11 @@ except ImportError:  # Supports running this file directly with `python src/main
     from repositories.qdrant_repository import QdrantHttpClient, index_chunks
     from routes.v1.router import api_router
     from services.document_service import make_document_id, process_pdf_document
+    from services.document_registry import (
+        reserve_document,
+        sha256_file,
+        update_document_status,
+    )
     from services.embedding_service import DeepInfraEmbeddingClient
     from services.progress_service import (
         STAGE_MESSAGES,
@@ -63,6 +73,7 @@ register_exception_handlers(app)
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 CHUNKS_DIR = DATA_DIR / "chunks"
 UPLOADS_DIR = DATA_DIR / "uploads"
+DOCUMENT_REGISTRY_PATH = DATA_DIR / "document_registry.sqlite3"
 BACKGROUND_TASKS: set[asyncio.Task[None]] = set()
 
 # Allow the Vite development server to call the API from the browser.
@@ -98,6 +109,32 @@ def remember_background_task(task: asyncio.Task[None]) -> None:
     task.add_done_callback(on_done)
 
 
+def set_registry_status(
+    document: PendingDocument,
+    status: str,
+    *,
+    indexed_chunks: int | None = None,
+    error: str | None = None,
+) -> None:
+    """Persist lifecycle state without hiding the underlying document result."""
+    try:
+        update_document_status(
+            DOCUMENT_REGISTRY_PATH,
+            document_hash=document.document_hash,
+            ingestion_id=document.ingestion_id,
+            status=status,
+            indexed_chunks=indexed_chunks,
+            error=error,
+        )
+    except Exception:
+        logger.exception(
+            "Document registry update failed | filename=%s ingestion_id=%s status=%s",
+            document.filename,
+            document.ingestion_id,
+            status,
+        )
+
+
 async def process_document_job(
     job: DocumentJob,
     documents: list[PendingDocument],
@@ -110,6 +147,7 @@ async def process_document_job(
     except Exception as error:
         logger.exception("Background job could not start | job_id=%s", job.job_id)
         for document in documents:
+            set_registry_status(document, "failed", error=str(error))
             shutil.rmtree(document.workspace, ignore_errors=True)
             await job.publish(
                 event_type="document_status",
@@ -132,6 +170,7 @@ async def process_document_job(
     try:
         for document in documents:
             try:
+                set_registry_status(document, "processing")
                 await job.publish(
                     event_type="document_status",
                     filename=document.filename,
@@ -214,6 +253,11 @@ async def process_document_job(
                     batch_size=settings.embedding_batch_size,
                     on_progress=report_progress,
                 )
+                set_registry_status(
+                    document,
+                    "completed",
+                    indexed_chunks=indexed_chunks,
+                )
                 successful_documents += 1
                 await job.publish(
                     event_type="document_status",
@@ -230,6 +274,7 @@ async def process_document_job(
                     qdrant_collection=settings.qdrant_collection,
                 )
             except Exception as error:
+                set_registry_status(document, "failed", error=str(error))
                 logger.exception(
                     "Document background processing failed | job_id=%s filename=%s "
                     "ingestion_id=%s",
@@ -372,17 +417,55 @@ async def upload_documents(
             )
             output_path = CHUNKS_DIR / output_filename
             ingestion_id = uuid4().hex
+            document_hash: str | None = None
+            registry_reserved = False
 
             try:
                 await uploaded_file.seek(0)
                 with pdf_path.open("wb") as destination:
                     shutil.copyfileobj(uploaded_file.file, destination)
+                document_hash = sha256_file(pdf_path)
+                document_id = make_document_id(original_filename)
+                existing_document = reserve_document(
+                    DOCUMENT_REGISTRY_PATH,
+                    document_hash=document_hash,
+                    document_id=document_id,
+                    filename=original_filename,
+                    ingestion_id=ingestion_id,
+                )
+                if existing_document is not None:
+                    error_message = (
+                        "Dokumen sudah pernah diinput "
+                        f"(status: {existing_document.status}, "
+                        f"file: {existing_document.filename})"
+                    )
+                    failed_files.append(
+                        {
+                            "filename": original_filename,
+                            "error": error_message,
+                            "code": "duplicate_document",
+                            "existing_status": existing_document.status,
+                        }
+                    )
+                    await job.publish(
+                        event_type="document_status",
+                        filename=original_filename,
+                        stage="failed",
+                        status="failed",
+                        message=f"{STAGE_MESSAGES['failed']}: {error_message}",
+                        error=error_message,
+                        error_code="duplicate_document",
+                    )
+                    shutil.rmtree(workspace, ignore_errors=True)
+                    continue
+                registry_reserved = True
                 document = PendingDocument(
                     filename=original_filename,
                     pdf_path=pdf_path,
                     workspace=workspace,
                     output_path=output_path,
                     ingestion_id=ingestion_id,
+                    document_hash=document_hash,
                 )
                 pending_documents.append(document)
                 await job.publish(
@@ -393,6 +476,20 @@ async def upload_documents(
                     message=STAGE_MESSAGES["upload"],
                 )
             except Exception as error:
+                if registry_reserved and document_hash is not None:
+                    try:
+                        update_document_status(
+                            DOCUMENT_REGISTRY_PATH,
+                            document_hash=document_hash,
+                            ingestion_id=ingestion_id,
+                            status="failed",
+                            error=str(error),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Could not mark upload reservation as failed | filename=%s",
+                            original_filename,
+                        )
                 logger.exception(
                     "Uploaded file could not be saved | job_id=%s filename=%s",
                     job.job_id,
@@ -433,6 +530,15 @@ async def upload_documents(
             message="Tidak ada dokumen valid untuk diproses",
         )
         shutil.rmtree(job_directory, ignore_errors=True)
+        if failed_files and all(
+            item.get("code") == "duplicate_document" for item in failed_files
+        ):
+            detail = (
+                failed_files[0]["error"]
+                if len(failed_files) == 1
+                else "Semua dokumen sudah pernah diinput"
+            )
+            raise HTTPException(status_code=409, detail=detail)
 
     return {
         "job_id": job.job_id,

@@ -55,7 +55,6 @@ class Settings:
     rerank_top_k: int = 7
     rrf_k: int = 60
     rerank_min_score: float = 0.05
-    query_rewrite_enabled: bool = True
     generation_max_tokens: int = 8192
 
     @classmethod
@@ -83,10 +82,6 @@ class Settings:
             rerank_top_k=_env_int("RERANK_TOP_K", 7),
             rrf_k=_env_int("RRF_K", 60),
             rerank_min_score=float(os.getenv("RERANK_MIN_SCORE", "0.05")),
-            query_rewrite_enabled=os.getenv(
-                "QUERY_REWRITE_ENABLED", "true"
-            ).strip().lower()
-            in {"1", "true", "yes", "on"},
             generation_max_tokens=_env_int("GENERATION_MAX_TOKENS", 8192),
         )
 

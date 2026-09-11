@@ -29,6 +29,9 @@ textarea { width: 100%; height: 190px; resize: vertical; margin-top: 29px; borde
 .result-heading .panel-kicker { margin: 0; color: #e9c84a; }
 .result-meta { color: #737b70; font: 10px 'DM Mono', monospace; white-space: nowrap; }
 .answer-copy { margin-top: 12px; color: #eeeae1; font-size: 14px; line-height: 1.75; white-space: pre-wrap; }
+.rewritten-query { margin-top: 18px; padding: 12px 14px; border-left: 2px solid #e9c84a; background: #121512; }
+.rewritten-query span { color: #e9c84a; font: 500 9px 'DM Mono', monospace; letter-spacing: .12em; }
+.rewritten-query p { margin: 7px 0 0; color: #aeb5aa; font-size: 12px; line-height: 1.6; }
 .source-section { margin-top: 26px; }
 .source-list { margin: 0; padding-left: 25px; color: #d8dcd2; }
 .source-item { padding: 10px 0 10px 4px; border-top: 1px solid #30352f; line-height: 1.5; }
@@ -37,5 +40,6 @@ textarea { width: 100%; height: 190px; resize: vertical; margin-top: 29px; borde
 .source-item strong, .source-item span { display: block; }
 .source-item strong { color: #d8dcd2; font-size: 12px; font-weight: 600; }
 .source-item span { margin-top: 3px; color: #7f887c; font: 10px 'DM Mono', monospace; }
+.source-item .source-score { color: #e9c84a; }
 .source-content { margin: 14px 0 4px; padding: 13px 14px; border-left: 2px solid #e9c84a; background: #121512; color: #aeb5aa; font-size: 12px; line-height: 1.7; white-space: pre-wrap; }
 @media (max-width: 600px) { .app-shell { padding-top: 22px; }.workspace { padding-top: 65px; }.tabs { gap: 20px; margin-top: 45px; }.tab { font-size: 12px; }.panel-footer { align-items: flex-start; flex-direction: column; }.primary-button { width: 100%; }.shortcut { display: none; } }
