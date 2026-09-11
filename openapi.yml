@@ -1,0 +1,397 @@
+openapi: 3.1.0
+info:
+  title: Insignia Labor Law Assistant API
+  version: 0.1.0
+  description: |
+    REST API untuk ingestion dokumen PDF dan question answering berbasis RAG
+    pada dokumen hukum ketenagakerjaan Indonesia.
+servers:
+  - url: http://localhost:8000
+    description: Local development
+tags:
+  - name: system
+    description: API availability and health
+  - name: documents
+    description: PDF upload and ingestion progress
+  - name: query
+    description: Grounded labor-law question answering
+paths:
+  /v1/:
+    get:
+      tags: [system]
+      summary: Get API information
+      operationId: getApiInfo
+      responses:
+        '200':
+          description: API is running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RootResponse'
+              example:
+                message: Insignia Labor Law Assistant API is running
+
+  /v1/health:
+    get:
+      tags: [system]
+      summary: Check backend liveness
+      operationId: getHealth
+      responses:
+        '200':
+          description: Backend is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+
+  /v1/documents/upload:
+    post:
+      tags: [documents]
+      summary: Upload one or more PDF documents
+      description: |
+        Upload diterima secara asynchronous. Gunakan job_id untuk memantau
+        ingestion melalui SSE atau status endpoint. File non-PDF ditolak.
+      operationId: uploadDocuments
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [files]
+              properties:
+                files:
+                  type: array
+                  minItems: 1
+                  items:
+                    type: string
+                    format: binary
+                  description: One or more PDF files.
+      responses:
+        '200':
+          description: Upload accepted or contains per-file failures
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadResponse'
+        '409':
+          description: All uploaded files are duplicate documents
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Unexpected upload failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/documents/{job_id}/events:
+    get:
+      tags: [documents]
+      summary: Stream ingestion progress
+      description: |
+        Server-Sent Events stream. Existing event history is sent first,
+        followed by live events until the job reaches completed or failed.
+      operationId: streamDocumentEvents
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: SSE progress stream
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            X-Accel-Buffering:
+              schema:
+                type: string
+          content:
+            text/event-stream:
+              schema:
+                type: string
+              example: |
+                event: document_status
+                data: {"type":"document_status","job_id":"abc123","filename":"uu.pdf","stage":"parsing","status":"processing","message":"Membaca PDF"}
+
+        '404':
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/documents/{job_id}/status:
+    get:
+      tags: [documents]
+      summary: Get ingestion event history
+      operationId: getDocumentStatus
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job event history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatusResponse'
+        '404':
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /v1/query:
+    post:
+      tags: [query]
+      summary: Ask a grounded labor-law question
+      description: |
+        Query diproses melalui scope filter, hybrid retrieval, reranking, dan
+        grounded generation. Pertanyaan di luar scope dikembalikan tanpa source.
+      operationId: queryLaborLaw
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QueryRequest'
+            example:
+              query: Berapa lama maksimal PKWT?
+      responses:
+        '200':
+          description: Answer with retrieval metadata and sources
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryResponse'
+        '422':
+          description: Empty, invalid, or too-long query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: DeepInfra or Qdrant provider failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceErrorResponse'
+
+components:
+  parameters:
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      description: Background ingestion job identifier
+      schema:
+        type: string
+        minLength: 1
+
+  schemas:
+    RootResponse:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+
+    ErrorResponse:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+        error_type:
+          type: string
+
+    ServiceErrorResponse:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+      description: Application/provider error returned by the backend.
+
+    UploadedFile:
+      type: object
+      required: [filename, status]
+      properties:
+        filename:
+          type: string
+        status:
+          type: string
+          enum: [queued]
+
+    FailedFile:
+      type: object
+      required: [filename, error]
+      properties:
+        filename:
+          type: string
+        error:
+          type: string
+        code:
+          type: string
+          example: duplicate_document
+        existing_status:
+          type: string
+
+    UploadResponse:
+      type: object
+      required: [job_id, status, message, files, failed]
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          enum: [queued, failed]
+        message:
+          type: string
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/UploadedFile'
+        failed:
+          type: array
+          items:
+            $ref: '#/components/schemas/FailedFile'
+
+    ProgressEvent:
+      type: object
+      required: [type, job_id, filename, stage, status, message, log]
+      properties:
+        type:
+          type: string
+          enum: [document_status, job_status]
+        job_id:
+          type: string
+        filename:
+          type: string
+        stage:
+          type: string
+          enum: [upload, parsing, embedding, indexing, job, completed, failed]
+        status:
+          type: string
+          enum: [queued, processing, completed, failed]
+        message:
+          type: string
+        log:
+          type: string
+        error:
+          type: string
+        error_code:
+          type: string
+        chunks:
+          type: integer
+        indexed_chunks:
+          type: integer
+        progress_current:
+          type: integer
+        progress_total:
+          type: integer
+        progress_percent:
+          type: number
+        progress_unit:
+          type: string
+        native_pages:
+          type: integer
+        ocr_pages:
+          type: integer
+        total_pages:
+          type: integer
+
+    JobStatusResponse:
+      type: object
+      required: [job_id, events]
+      properties:
+        job_id:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProgressEvent'
+
+    QueryRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: Pertanyaan pengguna dalam Bahasa Indonesia.
+
+    QuerySource:
+      type: object
+      required: [id, document, chunk_id, text, rerank_score]
+      properties:
+        id:
+          type: integer
+        document:
+          type: string
+        page:
+          type: [integer, 'null']
+        page_end:
+          type: integer
+        chapter:
+          type: string
+        article:
+          type: string
+          example: Pasal 8
+        paragraph:
+          type: string
+          example: Ayat 1
+        chunk_id:
+          type: string
+        text:
+          type: string
+        rerank_score:
+          type: number
+          format: double
+
+    RetrievalMetadata:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+        normalized_query:
+          type: string
+        rewritten_query:
+          type: [string, 'null']
+        filtered:
+          type: boolean
+        filter_reason:
+          type: string
+        candidate_chunks:
+          type: integer
+        reranked_chunks:
+          type: integer
+        retrieved_chunks:
+          type: integer
+        latency_ms:
+          type: number
+          format: double
+
+    QueryResponse:
+      type: object
+      required: [answer, sources, retrieval]
+      properties:
+        answer:
+          type: string
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/QuerySource'
+        retrieval:
+          $ref: '#/components/schemas/RetrievalMetadata'

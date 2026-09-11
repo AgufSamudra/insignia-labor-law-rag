@@ -1,182 +1,60 @@
-PIPELINE INGESTION DOKUMEN RAG (IMPLEMENTASI SAAT INI)
-=====================================================
+PIPELINE INGESTION DOKUMEN RAG
+=============================
 
 Tujuan
 ------
-Mengubah satu atau beberapa PDF hukum ketenagakerjaan menjadi chunk terstruktur,
-membuat dense dan sparse embedding, lalu menyimpannya ke Qdrant. Proses berjalan
-di background setelah API upload mengembalikan job_id.
+Mengubah PDF hukum ketenagakerjaan menjadi chunk, membuat embedding dense dan
+sparse, lalu menyimpannya ke Qdrant.
 
-Urutan fungsi orchestration
---------------------------
-1. one_validate_and_save_uploaded_files
-2. two_schedule_background_processing
-3. three_process_document_job
-4. four_extract_document_chunks
-5. five_save_vectors_to_qdrant
-6. six_mark_document_completed
-7. seven_finalize_upload_job
+Orkestrasi utama
+----------------
+Fungsi pipeline berada di `backend/src/utils/document/upload_pipeline_utils.py`:
 
-Seluruh fungsi tersebut berada di
-backend/src/utils/document/upload_pipeline_utils.py.
+1. Validasi dan simpan file.
+2. Buat job background dan kembalikan `job_id`.
+3. Ekstrak serta bersihkan teks PDF.
+4. Parse struktur hukum.
+5. Buat chunk dan simpan JSONL.
+6. Buat embedding dan upsert ke Qdrant.
+7. Tandai status job dan hapus file sementara.
 
-Diagram flow
-------------
+Alur
+----
+1. Frontend mengirim PDF ke `POST /v1/documents/upload`.
+2. Backend memvalidasi ekstensi, menghitung SHA-256, dan mengecek registry SQLite.
+   File duplikat yang sedang atau sudah diproses ditolak; file yang gagal dapat
+   dicoba ulang.
+3. Backend membuat job berstatus `queued` dan memproses setiap PDF di background.
+   Progress dapat dipantau melalui SSE:
+   `GET /v1/documents/{job_id}/events`.
+4. Teks diambil dengan pendekatan native-first:
+   - Native text digunakan jika panjangnya minimal 200 karakter.
+   - Full-page OCR (PyMuPDF + Tesseract, bahasa Indonesia) digunakan jika native
+     text kurang dari 200 karakter dan gambar terbesar menutupi minimal 70% halaman.
+5. Hasil disusun berdasarkan halaman, lalu dibersihkan dari whitespace, karakter
+   rusak, header/footer berulang, dan hyphen pemisah baris.
+6. Teks di-parse menjadi BAB, Bagian, Paragraf, Pasal, dan Ayat. Teks di luar
+   Pasal tidak dibuat menjadi chunk; parsing berhenti pada heading PENJELASAN.
+7. Setiap Pasal/Ayat dipecah menjadi chunk maksimal 1.000 karakter tanpa overlap.
+   Metadata halaman dan struktur hukum ikut disimpan.
+8. Chunk disimpan di `backend/data/chunks/*.jsonl`, lalu diproses per batch.
+9. Model embedding default `BAAI/bge-m3-multi` membuat vector dense dan sparse.
+   Vector di-upsert ke collection Qdrant dengan nama `dense` dan `sparse`.
+10. Jika berhasil, dokumen berstatus `completed`; jika gagal, berstatus `failed`.
 
-Pengguna memilih satu/beberapa file PDF di frontend
-                         |
-                         v
-POST /v1/documents/upload
-                         |
-                         v
-Validasi ekstensi .pdf untuk setiap file
-       | valid                         | tidak valid
-       v                               v
-Simpan ke workspace sementara     Catat status failed
-+ buat ingestion_id               untuk file tersebut
-+ siapkan nama output JSONL
-       |
-       v
-Hitung SHA-256 dan reserve di SQLite document registry
-       | hash baru / retry failed         | hash sudah queued/processing/completed
-       v                                  v
-Lanjutkan ingestion                 Tolak sebagai duplicate_document
-                                    (HTTP 409 bila seluruh file duplicate)
-       |
-       v
-Publish event "upload / queued"
-       |
-       v
-API langsung mengembalikan job_id dan status queued
-       |
-       +---- Frontend memantau progress melalui SSE
-       |     GET /v1/documents/{job_id}/events
-       |     (status history tersedia di /v1/documents/{job_id}/status)
-       v
-Background job memproses dokumen satu per satu
-       |
-       v
-Buka PDF dengan PyMuPDF, selalu ambil native text, lalu periksa setiap halaman
-       |
-       +---- Native text >= 200 karakter -----------------> Native text extraction
-       |
-       +---- Image terbesar < 70% area halaman ----------> Native text extraction
-       |
-       `---- Native text < 200 karakter DAN image >= 70% -> Full-page OCR
-                                                           PyMuPDF + Tesseract
-                                                           bahasa ind, 300 DPI
-                                                           maksimal 4 process worker
-       |                                                   (OCR diproses paralel)
-       v
-Susun kembali seluruh hasil berdasarkan nomor halaman
-       |
-       v
-Text cleaning
-- normalisasi Unicode NFKC dan whitespace
-- hapus control character, soft hyphen, replacement character
-- hapus marker nomor halaman dan noise tanda baca OCR
-- hapus header tertentu (mis. PRESIDEN REPUBLIK INDONESIA, SK No.)
-- deteksi lalu hapus header/footer berulang pada margin antarhalaman
-- gabungkan kata yang terpotong hyphen saat pergantian baris
-       |
-       v
-Parsing struktur dokumen hukum secara berurutan
-- BAB + judul BAB
-- Bagian dan Paragraf dikenali sebagai batas struktur
-- Pasal
-- Ayat, jika tersedia
-- parsing dihentikan ketika heading PENJELASAN ditemukan
-- teks di luar Pasal tidak dibuat menjadi chunk
-       |
-       v
-Chunking per Pasal/Ayat
-- maksimal 1.000 karakter, dipotong pada batas kata
-- tanpa overlap
-- bagian panjang menjadi part 1, part 2, dan seterusnya
-- nomor halaman asal setiap kata dipertahankan sebagai metadata chunk
-       |
-       +---- Tidak ada chunk ----> Dokumen berstatus failed
-       |
-       v
-Simpan salinan chunk ke backend/data/chunks/*.jsonl
-       |
-       v
-Proses per batch (default 8 chunk)
-       |
-       v
-DeepInfra inference: BAAI/bge-m3-multi (default)
-- dense = true
-- sparse = true
-- colbert = false
-- normalize = true
-       |
-       v
-Pastikan collection Qdrant tersedia
-- named dense vector "dense", Cosine distance
-- named sparse vector "sparse", IDF modifier
-- dimensi dense mengikuti hasil embedding pertama
-       |
-       v
-Upsert point ke Qdrant (wait=true)
-       |
-       v
-Publish progress "embedding" dan "indexing"
-       |
-       +---- Berhasil ----> completed + jumlah chunk terindeks
-       |
-       `---- Gagal -------> failed + pesan error
-       |
-       v
-Hapus workspace PDF sementara dan publish status akhir job
+Metadata chunk
+--------------
+`filename`, `bab`, `bab_title`, `pasal`, `ayat`, `part`, `page_start`, `page_end`,
+`pages`, `text`, dan `chunk_id`.
 
-Catatan perilaku aktual
------------------------
+Point Qdrant memiliki payload metadata chunk, `point_id`, `ingestion_id`, serta
+`embedding_model`. ID point dibuat dari `ingestion_id` dan `chunk_id`.
 
-1. Pemilihan extraction bersifat native-first. OCR hanya dipakai ketika native text
-   kurang dari 200 karakter dan bounding box image terbesar menutupi minimal 70%
-   halaman. Kegagalan pemeriksaan image atau OCR menghentikan dokumen itu.
-2. OCR yang digunakan adalah Tesseract melalui PyMuPDF, bukan PaddleOCR.
-3. OCR page diproses paralel, tetapi parsing legal selalu dilakukan berurutan agar
-   state BAB/Pasal/Ayat dan metadata halaman tetap deterministik.
-4. Implementasi tidak membuat object parent dan child terpisah. Unit penyimpanan
-   adalah chunk Pasal/Ayat maksimal 1.000 karakter. Parent context Pasal baru
-   dirakit dari chunk terkait pada pipeline query.
-5. JSONL adalah artefak lokal hasil parsing. Retrieval membaca point dari Qdrant,
-   bukan langsung dari JSONL.
-6. SHA-256 file dan lifecycle ingestion disimpan di
-   backend/data/document_registry.sqlite3. File identik ditolak walaupun namanya
-   berbeda; ingestion berstatus failed dapat dicoba ulang.
-
-Struktur chunk JSONL
---------------------
-
-- filename
-- bab
-- bab_title
-- pasal
-- ayat (null bila Pasal tidak memiliki penanda ayat)
-- part
-- page_start
-- page_end
-- pages
-- text
-- chunk_id: {document_id}-pasal{pasal}-{ayat|noayat}-part{part}
-
-Struktur point Qdrant
----------------------
-
-- id point: UUID v5 dari ingestion_id + chunk_id
-- payload: seluruh metadata chunk di atas, point_id, ingestion_id, embedding_model
-- named vector "dense"
-- named vector "sparse" (indices + values)
-
-Progress dan lifecycle
-----------------------
-
-- State job dan riwayat event disimpan in-memory oleh backend.
-- Event SSE: document_status dan job_status.
-- Stage dokumen: upload, parsing, embedding, indexing, completed, atau failed.
-- Satu upload dapat berisi beberapa PDF; kegagalan satu PDF tidak menghentikan PDF
-  lain dalam job yang sama.
-- Workspace upload sementara dihapus setelah dokumen selesai atau gagal, sedangkan
-  file JSONL hasil parsing tetap berada di backend/data/chunks.
+Catatan
+-------
+- OCR hanya dipakai jika kondisi di atas terpenuhi.
+- OCR dapat berjalan paralel, tetapi parsing tetap berurutan.
+- Qdrant menyimpan chunk, bukan object parent. Parent context dirakit saat query.
+- JSONL adalah artefak parsing; retrieval membaca data dari Qdrant.
+- Status job dan riwayat event disimpan in-memory.
+- Satu job dapat berisi beberapa PDF. Kegagalan satu file tidak menghentikan file lain.

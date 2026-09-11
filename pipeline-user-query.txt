@@ -1,176 +1,52 @@
-PIPELINE USER QUERY RAG (IMPLEMENTASI SAAT INI)
-==============================================
+PIPELINE USER QUERY RAG
+======================
 
 Tujuan
 ------
-Menolak pertanyaan di luar hukum ketenagakerjaan sedini mungkin, mengambil bukti
-dari Qdrant dengan hybrid retrieval, lalu menghasilkan jawaban Bahasa Indonesia
-yang grounded dan memiliki referensi sumber.
+Memeriksa cakupan pertanyaan, mengambil bukti yang relevan dari Qdrant, lalu
+menghasilkan jawaban Bahasa Indonesia dengan referensi sumber.
 
-Diagram flow
-------------
+Alur
+----
+1. Frontend mengirim pertanyaan ke `POST /v1/query`.
+2. Backend memvalidasi query (1–2.000 karakter setelah trim). Query kosong
+   menghasilkan HTTP 422.
+3. Early scope filter memeriksa apakah pertanyaan termasuk hukum ketenagakerjaan.
+   Filter memakai `GENERATIVE_MODEL` dengan output JSON boolean.
+   Jika di luar cakupan, pipeline berhenti dan mengembalikan jawaban penolakan
+   dengan `filtered = true` serta `sources` kosong.
+4. Query yang lolos dinormalisasi (Unicode, whitespace, dan format Pasal/Ayat),
+   lalu di-rewrite dengan aturan tetap:
+   - Query yang menyebut Pasal/Ayat ditambah konteks “ketentuan dalam peraturan ketenagakerjaan”.
+   - Query lainnya ditambah “menurut peraturan ketenagakerjaan Indonesia”.
+5. `BAAI/bge-m3-multi` membuat vector dense dan sparse.
+6. Qdrant menjalankan dense search dan sparse search secara paralel. Hasilnya
+   digabung dengan Reciprocal Rank Fusion (RRF).
+7. Hasil fusion diurutkan oleh `Qwen/Qwen3-Reranker-4B`.
+   Default: maksimal 20 kandidat, ambil 7 hasil, dan buang score di bawah 0,05.
+8. Untuk setiap Pasal yang relevan, backend mengambil seluruh chunk Pasal tersebut
+   dari Qdrant untuk membentuk parent context (maksimal 6.000 karakter).
+   Jika gagal, chunk hasil rerank tetap digunakan.
+9. LLM membuat jawaban berdasarkan context dokumen saja, dalam Bahasa Indonesia,
+   dan menandai klaim dengan citation `[1]`, `[2]`, dan seterusnya.
+10. Backend membersihkan marker reasoning/Markdown dan mengembalikan jawaban,
+    sources, serta metadata retrieval. Jika citation tidak dibuat, nomor semua
+    sumber ditambahkan otomatis.
 
-Pengguna mengirim pertanyaan dari frontend
-                         |
-                         v
-POST /v1/query { "query": "..." }
-                         |
-                         v
-Validasi request
-- panjang model request: 1-2.000 karakter
-- trim whitespace
-- query kosong setelah trim -> HTTP 422
-                         |
-                         v
-EARLY SCOPE FILTER (sebelum embedding/retrieval)
-DeepInfra chat completion memakai GENERATIVE_MODEL
-- temperature 0
-- max_tokens 16
-- prompt meminta JSON {"is_labor_law": boolean}
-- /no_think dan abaikan instruksi di dalam query
-       |
-       +---- false ----> Respons out-of-scope
-       |                - jawaban penolakan
-       |                - sources kosong
-       |                - filtered = true
-       |                - tidak ada embedding/search/rerank/generation
-       |
-       `---- true
-              |
-              v
-Normalisasi query
-- Unicode NFKC
-- rapikan whitespace
-- samakan referensi menjadi "Pasal N" dan "Ayat N"
-              |
-              v
-Mandatory deterministic rewrite untuk setiap query yang lolos scope filter
-       | mengandung Pasal/Ayat
-       | -> tambah "ketentuan dalam peraturan ketenagakerjaan"
-       |
-       ` lainnya
-         -> tambah "menurut peraturan ketenagakerjaan Indonesia"
-              |
-              v
-DeepInfra BAAI/bge-m3-multi (default)
-- dense query vector
-- sparse query vector (indices + values)
-- normalized embedding; ColBERT tidak digunakan
-              |
-              v
-Qdrant search dijalankan paralel
-       +-----------------------------+
-       |                             |
-       v                             v
-Dense search "dense"            Sparse search "sparse"
-top RETRIEVAL_LIMIT             top RETRIEVAL_LIMIT
-(default 20)                    (default 20)
-       |                             |
-       +--------------+--------------+
-                      v
-Reciprocal Rank Fusion (RRF_K default 60)
-- gabungkan berdasarkan chunk_id
-- akumulasi 1 / (RRF_K + rank)
-- ambil maksimal RETRIEVAL_LIMIT kandidat (default 20)
-                      |
-                      v
-DeepInfra reranker: Qwen/Qwen3-Reranker-4B (default)
-- rerank selalu menggunakan rewritten query
-- urutkan rerank_score tertinggi
-- ambil RERANK_TOP_K (default 7)
-- buang hasil dengan score < RERANK_MIN_SCORE (default 0,05)
-       |
-       +---- Tidak ada hasil lolos ----> Jawaban bukti tidak cukup
-       |                                sources kosong; LLM generation dilewati
-       |
-       v
-Parent context expansion per pasangan filename + pasal
-- scroll Qdrant untuk seluruh chunk Pasal yang sama (maksimal 64 point)
-- request untuk beberapa Pasal dijalankan paralel
-- urutkan berdasarkan chunk_id lalu gabungkan text
-- batasi parent text maksimal 6.000 karakter
-- satu parent expansion hanya ditempel pada hit pertama untuk Pasal tersebut
-- bila expansion gagal, tetap gunakan text chunk hasil rerank
-       |
-       v
-Build labeled LLM context
-[1] filename · halaman · Pasal · Ayat
-    parent text hasil expansion atau text chunk
-[2] ...
-       |
-       v
-DeepInfra chat completion memakai GENERATIVE_MODEL
-- pertanyaan untuk generation = query hasil normalisasi, bukan rewritten query
-- hanya boleh memakai konteks dokumen
-- jawab dalam Bahasa Indonesia
-- wajib menandai klaim dengan [1], [2], dst.
-- temperature 0,7; max token default 8.192; /no_think
-       |
-       v
-Post-processing jawaban
-- hapus <think>...</think>
-- hapus marker Markdown **, __, dan heading #
-- jika model tidak memberi satu pun citation [n], tambahkan semua nomor sumber
-       |
-       v
-Final JSON response
-- answer
-- sources
-- setiap source memiliki rerank_score
-- retrieval metadata
-       |
-       v
-Frontend membersihkan marker reasoning sekali lagi lalu menampilkan rewritten query,
-jawaban, rerank score setiap sumber, dan daftar sumber yang dapat dibuka untuk
-melihat text chunk asli
+Jika bukti tidak lolos rerank, backend mengembalikan jawaban “bukti tidak cukup”
+tanpa menjalankan generasi LLM.
 
-Catatan perilaku aktual
------------------------
-
-1. Early scope filter benar-benar berjalan sebelum normalisasi, embedding, Qdrant,
-   dan reranker. Jika filter menilai pertanyaan bukan hukum ketenagakerjaan,
-   pipeline berhenti pada tahap tersebut.
-2. Rewrite bukan panggilan LLM. Rewrite bersifat rule-based dan dijalankan untuk
-   setiap query yang lolos early scope filter.
-3. Hybrid retrieval terdiri dari dua search Qdrant terpisah yang berjalan paralel,
-   kemudian difusikan di aplikasi dengan RRF.
-4. Reranker default adalah Qwen/Qwen3-Reranker-4B, bukan
-   BAAI/bge-reranker-v2-m3. Top-k aktual adalah 7, lalu masih dikenai minimum score.
-5. Parent context bukan record parent khusus. Backend mengambil ulang seluruh chunk
-   dengan filename dan Pasal yang sama dari Qdrant. Expansion dideduplikasi per
-   Pasal untuk context prompt, tetapi daftar sources tetap berasal dari setiap
-   child chunk yang lolos rerank.
-6. Proses "thinking" tidak diekspos sebagai fitur opsional: prompt memakai
-   /no_think dan backend/frontend menghapus tag <think> jika provider tetap
-   mengembalikannya.
-
-Format source pada response
---------------------------
-
-- id: nomor citation
-- document: filename
-- page dan page_end (jika lintas halaman)
-- chapter (jika ada BAB)
-- article (Pasal)
-- paragraph (Ayat, jika ada)
-- chunk_id
-- text: text child chunk asli yang lolos rerank
-- rerank_score
+Format source
+-------------
+Setiap source berisi `id`, `document`, `page`, `page_end`, `chapter`, `article`,
+`paragraph`, `chunk_id`, `text`, dan `rerank_score`.
 
 Metadata retrieval
 ------------------
+Query yang diproses penuh mengembalikan:
+`query`, `normalized_query`, `rewritten_query`, `candidate_chunks`,
+`reranked_chunks`, `retrieved_chunks`, dan `latency_ms`.
 
-Untuk query yang diproses penuh:
-- query
-- normalized_query
-- rewritten_query (selalu tersedia untuk query yang diproses penuh)
-- candidate_chunks
-- reranked_chunks
-- retrieved_chunks
-- latency_ms
-
-Untuk query di luar scope:
-- query
-- filtered = true
-- filter_reason = outside_labor_law_scope
-- retrieved_chunks = 0
+Query di luar cakupan mengembalikan:
+`query`, `filtered = true`, `filter_reason = outside_labor_law_scope`, dan
+`retrieved_chunks = 0`.
