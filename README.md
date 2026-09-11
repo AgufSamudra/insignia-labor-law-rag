@@ -165,7 +165,6 @@ Berapa lama maksimal PKWT?
 Apa syarat perpanjangan PKWT?
 Apa hak pekerja ketika mengalami PHK?
 Berapa lama waktu istirahat setelah bekerja empat jam terus-menerus?
-Apa isi Pasal 8 PP Nomor 35 Tahun 2021?
 Hak saya  # query ambigu
 Siapa pemenang pertandingan sepak bola kemarin?  # harus ditolak
 ~~~
@@ -178,6 +177,22 @@ Siapa pemenang pertandingan sepak bola kemarin?  # harus ditolak
 - Citation belum divalidasi otomatis per klaim.
 - Tidak ada authentication, multi-tenancy, atau conversation history.
 - Sistem tidak menjamin jawaban hukum final.
+
+## What is next
+
+- Menjalankan embedding, reranking, dan generation menggunakan GPU atau model
+  serving khusus agar latency lebih rendah dan throughput lebih tinggi.
+- Menggunakan OCR yang lebih khusus untuk dokumen hukum, kemudian menambahkan
+  preprocessing dan quality check untuk scan buram, tabel, cap, tanda tangan,
+  serta layout multi-column.
+- Memasukkan bagian PENJELASAN dan metadata dokumen secara lebih lengkap agar
+  retrieval dapat mempertimbangkan konteks pasal, jenis peraturan, dan versi
+  atau tanggal berlaku.
+- Mencoba beberapa eksperimen dan skema, karena metode yang efektif di satu proyek belum tentu memberikan hasil yang sama baiknya di proyek lain, begitu juga sebaliknya.
+- Menerapkan chunking berbasis struktur hukum dengan overlap,
+  misalnya mempertahankan hubungan antara bab, pasal, ayat, dan huruf.
+- Membuat dataset evaluasi untuk mengukur kualitas OCR,
+  retrieval, reranking, citation, refusal, serta factuality jawaban.
 
 ## Penggunaan agentic coding tool
 
